@@ -23,7 +23,7 @@ except ImportError:
 # ═══════════════════════════════════════════
 # 1. 基础配置与全局常量
 # ═══════════════════════════════════════════
-st.set_page_config(page_title="华脉规格书专业排版系统", layout="wide", page_icon="📄")
+st.set_page_config(page_title="华脉规格书排版系统", layout="wide", page_icon="📄")
 
 CONFIG_FILE = "huamai_web_config.json"
 KIMI_API_URL = "https://api.moonshot.cn/v1/chat/completions"
@@ -103,7 +103,7 @@ def is_header(raw_line):
 
 def call_kimi(prompt):
     if not st.session_state.kimi_key:
-        return "【错误】请先在左上角【⚙️ 系统设置】中配置 Kimi API Key。"
+        return "【错误】请先在左侧【⚙️ 系统设置】中配置 Kimi API Key。"
     try:
         res = requests.post(KIMI_API_URL, headers={"Authorization": f"Bearer {st.session_state.kimi_key}"},
                             json={"model": "moonshot-v1-8k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2})
@@ -134,16 +134,14 @@ def bytes_to_b64(b):
     return base64.b64encode(b).decode('utf-8')
 
 # ═══════════════════════════════════════════
-# 4. Word 导出算法 (彻底修复背景图错乱与空白页)
+# 4. Word 导出算法
 # ═══════════════════════════════════════════
 def _add_word_bg(section, bg_bytes):
     if not bg_bytes: return
     hdr = section.header
     hdr.is_linked_to_previous = False
     
-    # 强制清空现有段落，防止继承污染
-    if len(hdr.paragraphs) == 0:
-        p = hdr.add_paragraph()
+    if len(hdr.paragraphs) == 0: p = hdr.add_paragraph()
     else:
         p = hdr.paragraphs[0]
         p.text = "" 
@@ -172,17 +170,14 @@ def generate_word_document(lang):
     fn = st.session_state.font_cn if lang == 'cn' else st.session_state.font_en
     txt = st.session_state.txt_cn if lang == 'cn' else st.session_state.txt_en
     
-    # 页面设置
     sec = doc.sections[0]
     sec.page_width = Mm(210); sec.page_height = Mm(297)
     sec.top_margin = Mm(25.4); sec.bottom_margin = Mm(25.4); sec.left_margin = Mm(19.1); sec.right_margin = Mm(19.1)
     doc.styles['Normal'].font.name = fn
     if lang == 'cn': doc.styles['Normal']._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 1. 独立生成封面及背景
-    if st.session_state.bg_cover_bytes: 
-        _add_word_bg(sec, st.session_state.bg_cover_bytes)
-        
+    # 封面
+    if st.session_state.bg_cover_bytes: _add_word_bg(sec, st.session_state.bg_cover_bytes)
     cp = doc.add_paragraph(); cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for _ in range(12): cp.add_run('\n')
     cover_title = st.session_state.cover_cn if lang == 'cn' else st.session_state.cover_en
@@ -190,16 +185,14 @@ def generate_word_document(lang):
     rn.bold = True; rn.font.size = Pt(max(st.session_state.title_size + 14, 24)); rn.font.name = fn
     if lang == 'cn': rn._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 2. 独立生成正文及水印 (修复继承 Bug)
-    bs = doc.add_section() # 创建新的一节
-    bs.header.is_linked_to_previous = False # 核心：强制切断封面图继承
+    # 正文
+    doc.add_page_break()
+    bs = doc.add_section() 
+    bs.header.is_linked_to_previous = False 
     
-    if st.session_state.bg_body_bytes:
-        _add_word_bg(bs, st.session_state.bg_body_bytes)
+    if st.session_state.bg_body_bytes: _add_word_bg(bs, st.session_state.bg_body_bytes)
     else:
-        # 如果正文没有设置水印，必须强制清空，否则会漏出封面图
-        if len(bs.header.paragraphs) > 0:
-            bs.header.paragraphs[0].text = ""
+        if len(bs.header.paragraphs) > 0: bs.header.paragraphs[0].text = ""
     
     lines = txt.split('\n')
     tr = [] 
@@ -213,7 +206,6 @@ def generate_word_document(lang):
         lt = line.strip()
         if not lt: continue
         
-        # 表格处理
         if '|' in lt:
             if '---' in lt: continue
             cells = [clean_markdown(c) for c in lt.strip('|').split('|') if c.strip() != '']
@@ -233,19 +225,16 @@ def generate_word_document(lang):
                     tr = []; doc.add_paragraph()
             continue
 
-        # 标题处理
         if is_header(lt):
             p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(12)
             render_run(p, clean_markdown(lt), st.session_state.title_size, True)
             continue
             
-        # 图框预留
         if 'IMG_FRAME' in lt:
             p = doc.add_paragraph()
             render_run(p, f"【排版预留：产品图片占位框】", st.session_state.body_size, True)
             continue
 
-        # 普通正文与列表
         p = doc.add_paragraph()
         if lt.startswith(('-', '*', '•')):
             sym_val = BULLET_STYLES.get(st.session_state.bullet, "● ")
@@ -260,28 +249,55 @@ def generate_word_document(lang):
     return target_stream
 
 # ═══════════════════════════════════════════
-# 5. UI 交互布局 (完全 1:1 还原桌面版体验)
+# 5. 极致紧凑 UI 交互布局 (CSS 深度优化)
 # ═══════════════════════════════════════════
 st.markdown("""
     <style>
-    .block-container { padding-top: 1rem; padding-bottom: 0rem; padding-left: 2rem; padding-right: 2rem; max-width: 98%; }
-    .stTextArea textarea { font-family: Consolas, monospace; font-size: 14px; background-color: #ffffff; border: 1px solid #d1d1d6; }
-    .header-text { font-size: 22px; font-weight: bold; color: #1D1D1F; margin-bottom: 10px; }
+    /* 全局边距紧凑化 */
+    .block-container { padding-top: 1.5rem !important; padding-bottom: 0rem !important; padding-left: 2rem !important; padding-right: 2rem !important; max-width: 98% !important; }
+    
+    /* 强制缩小所有按钮、弹出框按钮和下载按钮 */
+    .stButton > button, .stDownloadButton > button, .stPopover > button {
+        font-size: 13px !important;
+        padding: 2px 10px !important;
+        min-height: 32px !important;
+        height: 32px !important;
+        border-radius: 4px !important;
+    }
+    .stDownloadButton > button { font-weight: bold; background-color: #007AFF; color: white; border: none; }
+    
+    /* 输入框与下拉框紧凑化 */
+    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { 
+        font-size: 13px !important; min-height: 32px !important; 
+    }
+    
+    /* 表单标签文字缩小 */
+    label, .stMarkdown p { font-size: 13px !important; margin-bottom: 2px !important; }
+    
+    /* 编辑区文本框优化 */
+    .stTextArea textarea { font-family: Consolas, monospace; font-size: 13px; background-color: #ffffff; border: 1px solid #d1d1d6; }
+    
+    /* 标题定制 */
+    .header-text { font-size: 20px; font-weight: bold; color: #1D1D1F; margin-bottom: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-text">📄 华脉规格书专业排版系统 - 现代沉浸版</div>', unsafe_allow_html=True)
 
-# 还原三列黄金布局
-col_left, col_mid, col_right = st.columns([1.2, 2.5, 0.8], gap="medium")
+col_left, col_mid, col_right = st.columns([1.2, 2.8, 0.8], gap="small")
 
 # ----------------- 【左侧】文本与参数 & AI -----------------
 with col_left:
     with st.container(border=True):
         st.markdown("**1. 基础配置**")
         
-        # 醒目的资料上传区
-        st.markdown("<span style='font-size: 13px; color: #666;'>📂 导入文档(PDF/DOCX) 解析底层资料</span>", unsafe_allow_html=True)
+        with st.popover("⚙️ 系统设置 (API密钥)", use_container_width=True):
+            st.text_input("Kimi API Key", key="kimi_key", type="password")
+            st.text_input("百度翻译 APP ID", key="bd_id")
+            st.text_input("百度翻译 密钥", key="bd_key", type="password")
+            st.button("💾 保存配置", on_click=save_config, type="primary", use_container_width=True)
+
+        st.markdown("<span style='font-size: 12px; color: #666;'>📂 导入文档(PDF/DOCX)</span>", unsafe_allow_html=True)
         doc_file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
         if doc_file:
             if st.button("🚀 提取资料与高清图片", use_container_width=True):
@@ -296,16 +312,10 @@ with col_left:
 
         st.divider()
 
-        with st.popover("⚙️ 系统设置 (API 密钥)", use_container_width=True):
-            st.text_input("Kimi API Key", key="kimi_key", type="password")
-            st.text_input("百度翻译 APP ID", key="bd_id")
-            st.text_input("百度翻译 密钥", key="bd_key", type="password")
-            st.button("💾 保存配置", on_click=save_config, type="primary", use_container_width=True)
-
-        c1, c2 = st.columns(2)
+        c1, c2 = st.columns(2, gap="small")
         c1.text_input("封面:", key="cover_cn")
         c2.text_input("EN:", key="cover_en")
-        st.checkbox("产品特点含简短说明 (否则仅关键词)", key="feature_brief")
+        st.checkbox("产品特点含简短说明", key="feature_brief")
         
         def do_ai_write_action(lang):
             feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
@@ -315,48 +325,47 @@ with col_left:
                 if lang == 'cn': st.session_state.txt_cn = res; st.session_state.current_lang = 'cn'
                 else: st.session_state.txt_en = res; st.session_state.current_lang = 'en'
 
-        bc1, bc2 = st.columns(2)
-        if bc1.button("✨ AI 中文撰写", type="primary", use_container_width=True): do_ai_write_action('cn')
-        if bc2.button("🌐 AI EN Writing", type="primary", use_container_width=True): do_ai_write_action('en')
+        bc1, bc2 = st.columns(2, gap="small")
+        if bc1.button("✨ AI中文", type="primary", use_container_width=True): do_ai_write_action('cn')
+        if bc2.button("🌐 AI英文", type="primary", use_container_width=True): do_ai_write_action('en')
 
     tab_cn, tab_en = st.tabs(["中文文案", "English Copy"])
     with tab_cn:
-        st.text_area("编辑内容", key="txt_cn", height=500, label_visibility="collapsed")
+        st.text_area("编辑内容", key="txt_cn", height=450, label_visibility="collapsed")
     with tab_en:
-        st.text_area("EN Edit", key="txt_en", height=500, label_visibility="collapsed")
+        st.text_area("EN Edit", key="txt_en", height=450, label_visibility="collapsed")
 
 # ----------------- 【中间】排版预览区 & 顶部工具 -----------------
 with col_mid:
-    # 顶部排版控制条
+    # 顶部排版控制条（极其紧凑）
     with st.container(border=True):
-        tc1, tc2, tc3, tc4, tc5 = st.columns([1, 0.8, 0.8, 1, 1.2])
+        tc1, tc2, tc3, tc4, tc5 = st.columns([1.5, 1, 1, 1.2, 1.2], gap="small")
         tc1.selectbox("字体", FONT_CHOICES, key="font_cn", label_visibility="collapsed")
         tc2.number_input("标题", 8, 36, key="title_size")
         tc3.number_input("正文", 6, 24, key="body_size")
-        tc4.selectbox("符号", list(BULLET_STYLES.keys()), key="bullet")
+        tc4.selectbox("符号", list(BULLET_STYLES.keys()), key="bullet", label_visibility="collapsed")
         
-        with tc5.popover("🖼️ 背景图设置"):
-            cover_upload = st.file_uploader("1. 封面图 (A4)", type=['png','jpg'])
+        with tc5.popover("🖼️ 背景图设置", use_container_width=True):
+            st.caption("设置导出Word底图")
+            cover_upload = st.file_uploader("1. 封面(A4)", type=['png','jpg'], label_visibility="collapsed")
             if cover_upload: st.session_state.bg_cover_bytes = cover_upload.getvalue()
-            body_upload = st.file_uploader("2. 正文水印图 (A4)", type=['png','jpg'])
+            body_upload = st.file_uploader("2. 正文(A4)", type=['png','jpg'], label_visibility="collapsed")
             if body_upload: st.session_state.bg_body_bytes = body_upload.getvalue()
             if st.button("🗑️ 清空所有背景", use_container_width=True):
-                st.session_state.bg_cover_bytes = None
-                st.session_state.bg_body_bytes = None
+                st.session_state.bg_cover_bytes = None; st.session_state.bg_body_bytes = None
 
-        st.divider()
-        tb1, tb2, tb3, tb4, tb5, tb6 = st.columns([1,1,1,1,2,2])
-        if tb1.button("📸 1 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
-        if tb2.button("📸 2 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
-        if tb3.button("✂️ 去说明"): st.toast("请在左侧文本框手动调整。")
-        if tb4.button("🔄 去序号"): st.toast("排版系统已强制应用无序号符号！")
+        st.markdown("<div style='margin-top:-10px;'></div>", unsafe_allow_html=True) # 收缩行间距
+        tb1, tb2, tb3, tb4, tb5, tb6 = st.columns([1,1,1.2,1.2,1.8,1.8], gap="small")
+        if tb1.button("📸 1 框", use_container_width=True): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
+        if tb2.button("📸 2 框", use_container_width=True): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
+        if tb3.button("✂️ 去说明", use_container_width=True): st.toast("请在左侧文本框手动调整。")
+        if tb4.button("🔄 去序号", use_container_width=True): st.toast("系统已强制应用无序号符号！")
         
-        # 动态下载生成（完美解决文案不同步问题）
-        tb5.download_button("📥 导出 中文 Word", data=generate_word_document('cn'), file_name=f"{st.session_state.cover_cn}.docx", type="primary", use_container_width=True)
-        tb6.download_button("📥 导出 English Word", data=generate_word_document('en'), file_name=f"{st.session_state.cover_en}.docx", type="primary", use_container_width=True)
+        tb5.download_button("📥 导出中文 Word", data=generate_word_document('cn'), file_name=f"{st.session_state.cover_cn}.docx", use_container_width=True)
+        tb6.download_button("📥 导出英文 Word", data=generate_word_document('en'), file_name=f"{st.session_state.cover_en}.docx", use_container_width=True)
 
     # ---------------- 核心：独立 HTML A4 实时高保真渲染引擎 ----------------
-    st.markdown("##### 👁️ 实时排版预览区 (背景1:1复刻)")
+    st.markdown("<span style='font-size: 14px; font-weight: bold;'>👁️ 实时排版预览区 (背景1:1复刻)</span>", unsafe_allow_html=True)
     
     preview_txt = st.session_state.txt_cn if st.session_state.current_lang == 'cn' else st.session_state.txt_en
     cover_title = st.session_state.cover_cn if st.session_state.current_lang == 'cn' else st.session_state.cover_en
@@ -405,7 +414,6 @@ with col_mid:
     cv_bg = f"background-image: url('data:image/png;base64,{bytes_to_b64(st.session_state.bg_cover_bytes)}');" if st.session_state.bg_cover_bytes else "background-color: white;"
     bd_bg = f"background-image: url('data:image/png;base64,{bytes_to_b64(st.session_state.bg_body_bytes)}');" if st.session_state.bg_body_bytes else "background-color: white;"
 
-    # 使用 components.html 隔离渲染，彻底杜绝 Markdown 转义 Bug，完美实现 A4 画布
     iframe_html = f"""
     <!DOCTYPE html>
     <html>
@@ -417,7 +425,7 @@ with col_mid:
             .cover {{ height: 1123px; display: flex; align-items: center; justify-content: center; {cv_bg} }}
             .body-page {{ min-height: 1123px; padding: 96px 72px; text-align: left; {bd_bg} font-size: {body_px}px; color: #1D1D1F; line-height: 1.6; }}
             table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
-            td, th {{ border: 1px solid #000; padding: 8px; text-align: center; }}
+            td, th {{ border: 1px solid #000; padding: 8px; text-align: center; font-size: {body_px}px; }}
         </style>
     </head>
     <body>
@@ -430,11 +438,11 @@ with col_mid:
     </body>
     </html>
     """
-    components.html(iframe_html, height=750, scrolling=True)
+    components.html(iframe_html, height=720, scrolling=True)
 
 # ----------------- 【右侧】图库 -----------------
 with col_right:
-    st.markdown("### 📷 图库")
+    st.markdown("**📷 图库**")
     manual_upload = st.file_uploader("＋ 上传图片", accept_multiple_files=True, type=['png','jpg','jpeg'], label_visibility="collapsed")
     if manual_upload:
         for f in manual_upload:
