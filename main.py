@@ -1,9 +1,6 @@
 import streamlit as st
-import os, json, re, threading, requests, tempfile, zipfile, io
+import os, json, re, threading, requests, tempfile, zipfile, io, time, random, hashlib
 from PIL import Image
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 from docx import Document
 from docx.shared import Pt, Mm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -11,6 +8,9 @@ from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import pdfplumber
+
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     from bs4 import BeautifulSoup
@@ -30,10 +30,11 @@ CN_HEADER_KEYWORDS = ["产品描述","产品特点","产品指标","应用场景
 EN_HEADER_KEYWORDS = ["Product Description","Product Features","Technical Specifications","Product Specifications","Applications","Application Scenarios","Instructions","Installation","Notes","Product Images","Product Packaging"]
 
 FONT_CHOICES = ["微软雅黑","宋体","黑体","楷体","仿宋","Arial","Times New Roman","Calibri","Verdana","Georgia"]
-BULLET_STYLES = {"● 实心圆":"● ","■ 实心方":"■ ","▶ 三角形":"▶ ","◆ 菱形":"◆ ","○ 空心圆":"○ ","① 带圈数字":"__NUM__","1. 数字编号":"__DOT__","— 短横线":"— "}
+BULLET_STYLES = {"● 实心圆":"● ", "■ 实心方":"■ ", "▶ 三角形":"▶ ", "◆ 菱形":"◆ ", "○ 空心圆":"○ ", "① 带圈数字":"__NUM__", "1. 数字编号":"__DOT__", "— 短横线":"— "}
+LANGUAGES = {"自动检测":"auto", "中文":"zh", "英语":"en", "日语":"jp", "韩语":"kor", "法语":"fra", "德语":"de", "俄语":"ru", "西班牙语":"spa"}
 
 # ═══════════════════════════════════════════
-# 2. 配置存取逻辑 (解决刷新丢失配置的问题)
+# 2. 状态管理与配置保存 (解决每次刷新要重填的问题)
 # ═══════════════════════════════════════════
 def load_config():
     defaults = {
@@ -45,40 +46,47 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                defaults.update(saved)
+                defaults.update(json.load(f))
         except: pass
     return defaults
 
-def save_config(current_state):
+def save_config():
     to_save = {
-        'kimi_key': current_state.get('kimi_key', ''),
-        'bd_id': current_state.get('bd_id', ''),
-        'bd_key': current_state.get('bd_key', ''),
-        'font_cn': current_state.get('font_cn', '微软雅黑'),
-        'font_en': current_state.get('font_en', 'Arial'),
-        'title_size': current_state.get('title_size', 14),
-        'body_size': current_state.get('body_size', 11),
-        'cover_cn': current_state.get('cover_cn', '光纤跳线系列'),
-        'cover_en': current_state.get('cover_en', 'Fiber Optic Patch Cord'),
-        'bullet': current_state.get('bullet', '● 实心圆'),
-        'feature_brief': current_state.get('feature_brief', True)
+        'kimi_key': st.session_state.get('kimi_key', ''),
+        'bd_id': st.session_state.get('bd_id', ''),
+        'bd_key': st.session_state.get('bd_key', ''),
+        'font_cn': st.session_state.get('font_cn', '微软雅黑'),
+        'font_en': st.session_state.get('font_en', 'Arial'),
+        'title_size': st.session_state.get('title_size', 14),
+        'body_size': st.session_state.get('body_size', 11),
+        'cover_cn': st.session_state.get('cover_cn', '光纤跳线系列'),
+        'cover_en': st.session_state.get('cover_en', 'Fiber Optic Patch Cord'),
+        'bullet': st.session_state.get('bullet', '● 实心圆'),
+        'feature_brief': st.session_state.get('feature_brief', True)
     }
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False)
-        return True
-    except:
-        return False
+        st.toast("✅ 系统配置已保存！")
+    except Exception as e:
+        st.error(f"保存失败: {e}")
 
-# 初始化状态
-if 'app_config' not in st.session_state:
-    st.session_state['app_config'] = load_config()
-    st.session_state['txt_cn'] = ""
-    st.session_state['txt_en'] = ""
-    st.session_state['raw_text'] = ""
-    st.session_state['extracted_images'] = []
-    st.session_state['current_lang'] = 'cn'
+def init_session_state():
+    cfg = load_config()
+    for k, v in cfg.items():
+        if k not in st.session_state: st.session_state[k] = v
+        
+    # 初始化文本和缓存
+    if 'txt_cn' not in st.session_state: st.session_state.txt_cn = ""
+    if 'txt_en' not in st.session_state: st.session_state.txt_en = ""
+    if 'raw_text' not in st.session_state: st.session_state.raw_text = ""
+    if 'gallery_images' not in st.session_state: st.session_state.gallery_images = []
+    if 'bg_cover_bytes' not in st.session_state: st.session_state.bg_cover_bytes = None
+    if 'bg_body_bytes' not in st.session_state: st.session_state.bg_body_bytes = None
+    if 'word_cn_ready' not in st.session_state: st.session_state.word_cn_ready = None
+    if 'word_en_ready' not in st.session_state: st.session_state.word_en_ready = None
+
+init_session_state()
 
 # ═══════════════════════════════════════════
 # 3. 核心工具函数
@@ -96,30 +104,16 @@ def is_header(raw_line):
     return False
 
 def call_kimi(prompt):
-    api_key = st.session_state['app_config']['kimi_key']
-    if not api_key: return "【错误】请先在左侧栏输入 Kimi API Key 并保存配置。"
+    if not st.session_state.kimi_key:
+        return "【错误】请先在左上角【⚙️ 系统设置】中配置 Kimi API Key。"
     try:
-        res = requests.post(KIMI_API_URL, headers={"Authorization": f"Bearer {api_key}"},
+        res = requests.post(KIMI_API_URL, headers={"Authorization": f"Bearer {st.session_state.kimi_key}"},
                             json={"model": "moonshot-v1-8k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2})
         return res.json()["choices"][0]["message"]["content"]
     except Exception as e: return f"AI 错误: {str(e)}"
 
-def do_ai_write(lang):
-    cfg = st.session_state['app_config']
-    feat_rule = "特点只保留关键词，如「- 关键词」。" if not cfg['feature_brief'] else "特点包含简短说明。"
-    if lang == 'cn':
-        prompt = f"资料：\n{st.session_state['raw_text'][:6000]}\n\n要求：不输出产品名，以 **产品描述** 开头。严格使用标题：**产品描述** / **产品特点** / **产品指标** / **应用场景** / **使用说明**。\n注意：产品指标必须是Markdown表格。{feat_rule} 列表使用短横线 - 。"
-    else:
-        prompt = f"Source:\n{st.session_state['raw_text'][:6000]}\n\nRules: Start with **Product Description**. Use EXACT headings: **Product Description** / **Product Features** / **Product Specifications** / **Applications** / **Instructions**.\nSpecs MUST be a Markdown table. Use '-' for lists."
-    
-    with st.spinner("AI 智能撰写中，请稍候..."):
-        res = call_kimi(prompt)
-        if lang == 'cn': st.session_state['txt_cn'] = res
-        else: st.session_state['txt_en'] = res
-
 def extract_images_from_file(uploaded_file):
-    td = tempfile.mkdtemp()
-    extracted = []
+    imgs = []
     if uploaded_file.name.endswith(".pdf"):
         import fitz
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
@@ -128,30 +122,26 @@ def extract_images_from_file(uploaded_file):
                 xref = img[0]
                 base_image = doc.extract_image(xref)
                 image_bytes = base_image["image"]
-                if len(image_bytes) > 5000:
-                    img_path = os.path.join(td, f"page{i}_{xref}.{base_image['ext']}")
-                    with open(img_path, "wb") as f: f.write(image_bytes)
-                    extracted.append(img_path)
+                if len(image_bytes) > 5000: imgs.append(image_bytes)
     elif uploaded_file.name.endswith(".docx"):
         with zipfile.ZipFile(io.BytesIO(uploaded_file.read())) as z:
             for f in z.namelist():
                 if f.startswith("word/media/") and f.lower().endswith(('.png','.jpg','.jpeg')):
-                    img_path = os.path.join(td, os.path.basename(f))
-                    with open(img_path, "wb") as out: out.write(z.read(f))
-                    extracted.append(img_path)
-    return extracted
+                    data = z.read(f)
+                    if len(data) > 5000: imgs.append(data)
+    return imgs
 
 # ═══════════════════════════════════════════
-# 4. 完整的 Word 生成算法 (带背景图注入)
+# 4. Word 生成算法 (修复文案丢失与背景注入)
 # ═══════════════════════════════════════════
-def _add_word_bg(section, uploaded_bg_file):
+def _add_word_bg(section, bg_bytes):
+    if not bg_bytes: return
     hdr = section.header
     hdr.is_linked_to_previous = False
     run = hdr.paragraphs[0].add_run()
     
-    # 将上传的文件保存为临时文件供 docx 读取
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-        tmp.write(uploaded_bg_file.getvalue())
+        tmp.write(bg_bytes)
         tmp_path = tmp.name
 
     pic = run.add_picture(tmp_path, width=Mm(210), height=Mm(297))
@@ -160,20 +150,16 @@ def _add_word_bg(section, uploaded_bg_file):
     for tag, val in [('wp:positionH', 'page'), ('wp:positionV', 'page')]:
         pos = OxmlElement(tag)
         pos.set(qn('wp:relativeFrom'), val)
-        off = OxmlElement('wp:posOffset')
-        off.text = '0'
-        pos.append(off)
-        anc.append(pos)
-    for child in pic._inline:
-        anc.append(child)
+        off = OxmlElement('wp:posOffset'); off.text = '0'
+        pos.append(off); anc.append(pos)
+    for child in pic._inline: anc.append(child)
     pic._inline.getparent().replace(pic._inline, anc)
     os.unlink(tmp_path)
 
-def generate_word_document(lang, cover_bg_file=None, body_bg_file=None):
-    cfg = st.session_state['app_config']
+def generate_word_document(lang):
     doc = Document()
-    fn = cfg['font_cn'] if lang == 'cn' else cfg['font_en']
-    txt = st.session_state['txt_cn'] if lang == 'cn' else st.session_state['txt_en']
+    fn = st.session_state.font_cn if lang == 'cn' else st.session_state.font_en
+    txt = st.session_state.txt_cn if lang == 'cn' else st.session_state.txt_en
     
     # 页面设置 A4
     sec = doc.sections[0]
@@ -182,24 +168,24 @@ def generate_word_document(lang, cover_bg_file=None, body_bg_file=None):
     doc.styles['Normal'].font.name = fn
     if lang == 'cn': doc.styles['Normal']._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # --- 1. 生成封面 ---
-    if cover_bg_file: _add_word_bg(sec, cover_bg_file)
+    # 1. 封面
+    if st.session_state.bg_cover_bytes: _add_word_bg(sec, st.session_state.bg_cover_bytes)
     cp = doc.add_paragraph(); cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for _ in range(12): cp.add_run('\n')
-    cover_title = cfg['cover_cn'] if lang == 'cn' else cfg['cover_en']
+    cover_title = st.session_state.cover_cn if lang == 'cn' else st.session_state.cover_en
     rn = cp.add_run(cover_title if cover_title else "Product Specification")
-    rn.bold = True; rn.font.size = Pt(max(cfg['title_size'] + 14, 24)); rn.font.name = fn
+    rn.bold = True; rn.font.size = Pt(max(st.session_state.title_size + 14, 24)); rn.font.name = fn
     if lang == 'cn': rn._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # --- 2. 生成正文 ---
+    # 2. 正文
     doc.add_page_break()
     bs = doc.add_section()
-    if body_bg_file: _add_word_bg(bs, body_bg_file)
+    if st.session_state.bg_body_bytes: _add_word_bg(bs, st.session_state.bg_body_bytes)
     
     lines = txt.split('\n')
-    tr = [] # 表格缓冲
+    tr = [] 
     
-    def render_run(pa, text, size=cfg['body_size'], bold=False):
+    def render_run(pa, text, size=st.session_state.body_size, bold=False):
         r = pa.add_run(text)
         r.font.size = Pt(size); r.font.name = fn; r.bold = bold
         if lang == 'cn': r._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
@@ -213,8 +199,6 @@ def generate_word_document(lang, cover_bg_file=None, body_bg_file=None):
             if '---' in lt: continue
             cells = [clean_markdown(c) for c in lt.strip('|').split('|') if c.strip() != '']
             if cells: tr.append(cells)
-            
-            # 判断表格是否结束
             nxt = lines[idx+1].strip() if idx+1 < len(lines) else ""
             if not nxt or '|' not in nxt:
                 if tr:
@@ -226,34 +210,30 @@ def generate_word_document(lang, cover_bg_file=None, body_bg_file=None):
                                 cell = t.cell(r_idx, c_idx)
                                 cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                                 p = cell.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                                r = p.add_run(cell_val); r.font.name = fn; r.font.size = Pt(cfg['body_size'])
-                                if lang == 'cn': r._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
-                                if r_idx == 0: r.bold = True
+                                render_run(p, cell_val, st.session_state.body_size, r_idx==0)
                     tr = []; doc.add_paragraph()
             continue
 
         # 处理标题
         if is_header(lt):
             p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(12)
-            render_run(p, clean_markdown(lt), cfg['title_size'], True)
+            render_run(p, clean_markdown(lt), st.session_state.title_size, True)
             continue
             
-        # 处理列表
-        if lt.startswith(('-', '*', '•')):
-            p = doc.add_paragraph()
-            # 这里统一用黑圆点占位，保证网页导出格式干净
-            render_run(p, f"● {clean_markdown(lt[1:])}")
-            continue
-            
-        # 处理图框预留
+        # 处理图框占位
         if 'IMG_FRAME' in lt:
             p = doc.add_paragraph()
-            render_run(p, f"【请在此处插入产品图片】", cfg['body_size'], True)
+            render_run(p, f"【排版预留：产品图片占位框】", st.session_state.body_size, True)
             continue
 
-        # 普通文本
+        # 普通文本与列表
         p = doc.add_paragraph()
-        render_run(p, clean_markdown(lt))
+        if lt.startswith(('-', '*', '•')):
+            sym_val = BULLET_STYLES.get(st.session_state.bullet, "● ")
+            if sym_val in ("__NUM__", "__DOT__"): sym_val = "- "
+            render_run(p, f"{sym_val}{clean_markdown(lt[1:])}")
+        else:
+            render_run(p, clean_markdown(lt))
         
     target_stream = io.BytesIO()
     doc.save(target_stream)
@@ -261,124 +241,135 @@ def generate_word_document(lang, cover_bg_file=None, body_bg_file=None):
     return target_stream
 
 # ═══════════════════════════════════════════
-# 5. UI 交互布局
+# 5. UI 交互布局 (完全1:1还原桌面版排版)
 # ═══════════════════════════════════════════
-def main():
-    cfg = st.session_state['app_config']
+# 注入紧凑型 CSS，去除网页空白
+st.markdown("""
+    <style>
+    .block-container { padding-top: 1rem; padding-bottom: 0rem; padding-left: 2rem; padding-right: 2rem; }
+    .stTextArea textarea { font-family: Consolas, monospace; font-size: 14px; background-color: #f8f9fa; }
+    .a4-preview { background-color: white; padding: 40px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); min-height: 600px; }
+    </style>
+""", unsafe_allow_html=True)
+
+# 定义三列布局：左侧配置区(1.2), 中间排版区(2.5), 右侧图库(0.8)
+col_left, col_mid, col_right = st.columns([1.2, 2.5, 0.8])
+
+# ----------------- 左侧：基础配置与 AI 撰写 -----------------
+with col_left:
+    st.markdown("### 1. 基础配置")
     
-    # ---------------- 侧边栏：系统与参数设置 ----------------
-    with st.sidebar:
-        st.title("⚙️ 华脉系统设置")
-        
-        with st.expander("🔑 接口与密钥", expanded=True):
-            cfg['kimi_key'] = st.text_input("Kimi API Key", value=cfg['kimi_key'], type="password")
-            cfg['bd_id'] = st.text_input("百度翻译 ID", value=cfg['bd_id'])
-            cfg['bd_key'] = st.text_input("百度翻译 Key", value=cfg['bd_key'], type="password")
-        
-        with st.expander("📐 排版与字体", expanded=False):
-            cfg['font_cn'] = st.selectbox("中文字体", FONT_CHOICES, index=FONT_CHOICES.index(cfg['font_cn']) if cfg['font_cn'] in FONT_CHOICES else 0)
-            cfg['title_size'] = st.number_input("标题字号", 8, 36, cfg['title_size'])
-            cfg['body_size'] = st.number_input("正文字号", 6, 24, cfg['body_size'])
-            cfg['cover_cn'] = st.text_input("中文封面名称", cfg['cover_cn'])
-            cfg['cover_en'] = st.text_input("英文封面名称", cfg['cover_en'])
-            cfg['feature_brief'] = st.checkbox("产品特点含简短说明", cfg['feature_brief'])
-            
-        with st.expander("🖼️ Word 背景图设置", expanded=True):
-            st.info("导出 Word 时，以下图片将自动贴入底层作为背景")
-            cover_bg = st.file_uploader("1. 封面背景图 (A4竖版)", type=['png', 'jpg', 'jpeg'])
-            body_bg = st.file_uploader("2. 正文水印图 (A4竖版)", type=['png', 'jpg', 'jpeg'])
+    with st.popover("⚙️ 系统设置 (填入 API Key)", use_container_width=True):
+        st.text_input("Kimi API Key", key="kimi_key", type="password")
+        st.text_input("百度翻译 ID", key="bd_id")
+        st.text_input("百度翻译 Key", key="bd_key", type="password")
+        st.button("💾 保存设置", on_click=save_config, type="primary")
 
-        if st.button("💾 保存所有配置", use_container_width=True):
-            st.session_state['app_config'] = cfg
-            if save_config(cfg): st.success("配置已持久保存！")
-            else: st.error("保存失败，请检查读写权限。")
+    doc_file = st.file_uploader("导入文档(PDF/DOCX) 解析资料", type=['pdf', 'docx'])
+    if doc_file:
+        if st.button("🚀 开始解析文档内容与图片", use_container_width=True):
+            with st.spinner("解析资料中..."):
+                if doc_file.name.endswith(".pdf"):
+                    with pdfplumber.open(doc_file) as pdf:
+                        st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+                doc_file.seek(0)
+                extracted = extract_images_from_file(doc_file)
+                st.session_state.gallery_images.extend(extracted)
+            st.success("解析成功！图片已存入右侧图库。")
 
-    # ---------------- 主界面区 ----------------
-    st.markdown('<div style="font-size: 26px; font-weight: bold; color: #007AFF;">📄 华脉规格书专业排版系统 - 网页增强版</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    c1.text_input("封面:", key="cover_cn")
+    c2.text_input("EN:", key="cover_en")
+    st.checkbox("产品特点含简短说明 (否则仅关键词)", key="feature_brief")
+
+    def do_ai_write_action(lang):
+        feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
+        prompt = f"资料：\n{st.session_state.raw_text[:6000]}\n\n要求：不输出产品名，以 **产品描述** 开头。严格使用标题：**产品描述** / **产品特点** / **产品指标** / **应用场景** / **使用说明**。\n注意：产品指标必须是Markdown表格。{feat_rule} 列表使用短横线 - 。" if lang == 'cn' else f"Source:\n{st.session_state.raw_text[:6000]}\n\nRules: Start with **Product Description**. Use EXACT headings: **Product Description** / **Product Features** / **Product Specifications** / **Applications** / **Instructions**.\nSpecs MUST be a Markdown table. Use '-' for lists."
+        with st.spinner("Kimi 正在撰写中..."):
+            res = call_kimi(prompt)
+            if lang == 'cn': st.session_state.txt_cn = res
+            else: st.session_state.txt_en = res
+
+    bc1, bc2 = st.columns(2)
+    if bc1.button("✨ AI 中文撰写", type="primary", use_container_width=True): do_ai_write_action('cn')
+    if bc2.button("🌐 AI EN Writing", type="primary", use_container_width=True): do_ai_write_action('en')
+
+    tab_cn, tab_en, tab_prompt = st.tabs(["中文文案", "English Copy", "自定义提示词"])
+    with tab_cn:
+        st.text_area("编辑内容", key="txt_cn", height=500, label_visibility="collapsed")
+    with tab_en:
+        st.text_area("EN Edit", key="txt_en", height=500, label_visibility="collapsed")
+    with tab_prompt:
+        st.text_area("在此粘贴网页抓取要求", height=300)
+
+# ----------------- 中间：排版与预览区 -----------------
+with col_mid:
+    st.markdown("### 📄 预览与排版区")
     
-    # 顶部工具栏
-    t1, t2, t3, t4 = st.columns([1, 1, 1.5, 1.5])
-    with t1:
-        if st.button("✂️ 一键去冒号说明", use_container_width=True):
-            st.toast("提示：请在下方文本框中手动编辑或删除多余说明。")
-    with t2:
-        if st.button("🔀 一键去序号", use_container_width=True):
-            st.toast("提示：自动排版已禁用序号，均使用符号替代。")
-    with t3:
-        st.write("📥 **中文导出**")
-        word_cn = generate_word_document('cn', cover_bg, body_bg)
-        st.download_button("📄 下载 中文版规格书 (Word)", data=word_cn, file_name=f"{cfg['cover_cn']}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
-    with t4:
-        st.write("📥 **英文导出**")
-        word_en = generate_word_document('en', cover_bg, body_bg)
-        st.download_button("📄 下载 English Spec (Word)", data=word_en, file_name=f"{cfg['cover_en']}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
+    # 模拟桌面版的工具栏
+    with st.container(border=True):
+        tc1, tc2, tc3, tc4, tc5 = st.columns([1.5, 1, 1, 1, 1])
+        tc1.selectbox("字体", FONT_CHOICES, key="font_cn", label_visibility="collapsed")
+        tc2.number_input("标题", 8, 36, key="title_size")
+        tc3.number_input("正文", 6, 24, key="body_size")
+        tc4.selectbox("符号", list(BULLET_STYLES.keys()), key="bullet")
+        
+        with tc5.popover("🖼️ 背景设置"):
+            cover_upload = st.file_uploader("1. 封面图", type=['png','jpg'])
+            if cover_upload: st.session_state.bg_cover_bytes = cover_upload.getvalue()
+            body_upload = st.file_uploader("2. 水印图", type=['png','jpg'])
+            if body_upload: st.session_state.bg_body_bytes = body_upload.getvalue()
+            if st.button("🗑️ 清除背景"):
+                st.session_state.bg_cover_bytes = None
+                st.session_state.bg_body_bytes = None
 
+        tb1, tb2, tb3, tb4, tb5 = st.columns(5)
+        if tb1.button("📸 插入 1 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
+        if tb2.button("📸 插入 2 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
+        if tb3.button("🔀 行列互换"): st.toast("网页端暂不支持单表反转，请调整资料")
+        if tb4.button("✂️ 去说明"): st.toast("请在左侧文本框手动调整")
+        
+        # 导出区域，使用回调函数生成 Word 并显示下载按钮
+        def prepare_download():
+            with st.spinner("正在排版并生成 Word..."):
+                st.session_state.word_cn_ready = generate_word_document('cn')
+                st.session_state.word_en_ready = generate_word_document('en')
+        
+        if tb5.button("📦 打包生成 Word", type="primary"):
+            prepare_download()
+
+    if st.session_state.word_cn_ready:
+        dc1, dc2 = st.columns(2)
+        dc1.download_button("📥 下载 中文版规格书", data=st.session_state.word_cn_ready, file_name=f"{st.session_state.cover_cn}.docx", use_container_width=True)
+        dc2.download_button("📥 下载 English Spec", data=st.session_state.word_en_ready, file_name=f"{st.session_state.cover_en}.docx", use_container_width=True)
+
+    # A4 页面预览
+    preview_txt = st.session_state.txt_cn if st.session_state.txt_cn else "👈 请在左侧生成或输入文案，在此处预览排版结构"
+    html_txt = preview_txt.replace("[IMG_FRAME:1]", "<br><b>🖼️ [此处预留 1 张产品图]</b><br>")
+    html_txt = html_txt.replace("[IMG_FRAME:2]", "<br><b>🖼️ [此处预留 2 张产品图]</b><br>")
+    
+    st.markdown('<div class="a4-preview">', unsafe_allow_html=True)
+    st.markdown(f"# {st.session_state.cover_cn}")
     st.divider()
+    st.markdown(html_txt)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ---------------- 功能页签 ----------------
-    tab1, tab2, tab3 = st.tabs(["📝 文案创作与编辑", "📂 素材解析与图库", "👁️ 简易预览"])
-    
-    with tab1:
-        col_cn, col_en = st.columns(2)
-        with col_cn:
-            st.subheader("🇨🇳 中文排版区")
-            if st.button("✨ 启动 Kimi 撰写 (中文)", use_container_width=True): do_ai_write('cn')
-            st.session_state['txt_cn'] = st.text_area("中文 Markdown 代码", value=st.session_state['txt_cn'], height=500, label_visibility="collapsed")
-            if st.session_state['txt_cn']: st.session_state['current_lang'] = 'cn'
-            
-        with col_en:
-            st.subheader("🇬🇧 English Copy")
-            if st.button("✨ Start AI Writing (EN)", use_container_width=True): do_ai_write('en')
-            st.session_state['txt_en'] = st.text_area("English Markdown Code", value=st.session_state['txt_en'], height=500, label_visibility="collapsed")
-            if st.session_state['txt_en'] and not st.session_state['txt_cn']: st.session_state['current_lang'] = 'en'
-
-    with tab2:
-        col_doc, col_gallery = st.columns([1, 2])
-        with col_doc:
-            st.subheader("1. 导入资料并提取文本/图片")
-            doc_file = st.file_uploader("上传 PDF 或 DOCX 文件", type=['pdf', 'docx'])
-            if st.button("解析文本与图片", use_container_width=True) and doc_file:
-                with st.spinner("深度解析中..."):
-                    # 提文本
-                    if doc_file.name.endswith(".pdf"):
-                        with pdfplumber.open(doc_file) as pdf:
-                            st.session_state['raw_text'] = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-                    # 提图片
-                    doc_file.seek(0)
-                    imgs = extract_images_from_file(doc_file)
-                    st.session_state['extracted_images'].extend(imgs)
-                st.success("解析成功！已更新参考素材及图库。")
+# ----------------- 右侧：图库 -----------------
+with col_right:
+    st.markdown("### 📷 图库")
+    manual_upload = st.file_uploader("＋ 上传图片", accept_multiple_files=True, type=['png','jpg','jpeg'], label_visibility="collapsed")
+    if manual_upload:
+        for f in manual_upload:
+            bytes_data = f.getvalue()
+            if bytes_data not in st.session_state.gallery_images:
+                st.session_state.gallery_images.append(bytes_data)
                 
-            with st.expander("查看当前识别的文本素材"):
-                st.text(st.session_state['raw_text'][:2000] + "\n...")
-
-        with col_gallery:
-            st.subheader("2. 提取图片画廊")
-            st.info("从文档中提取的高清图片列表（导出 Word 后，可将它们贴入图框位置）")
-            if st.session_state['extracted_images']:
-                cols = st.columns(3)
-                for i, img_path in enumerate(st.session_state['extracted_images']):
-                    try:
-                        with cols[i % 3]:
-                            st.image(img_path, use_container_width=True, caption=os.path.basename(img_path))
-                    except: pass
-            else:
-                st.write("暂无提取的图片。")
-
-    with tab3:
-        st.subheader("网页实时内容预览")
-        st.caption("提示：此处仅预览文本内容结构。准确的A4排版、字体、以及您上传的封面背景/水印，请点击上方『下载 Word』查看。")
-        preview_txt = st.session_state['txt_cn'] if st.session_state['current_lang'] == 'cn' else st.session_state['txt_en']
+    if st.button("🗑 清空图库", use_container_width=True):
+        st.session_state.gallery_images = []
+        st.rerun()
         
-        with st.container(border=True):
-            cover = cfg['cover_cn'] if st.session_state['current_lang'] == 'cn' else cfg['cover_en']
-            st.markdown(f"# {cover}")
-            st.divider()
-            
-            # 简化网页端预览展示
-            html_txt = preview_txt.replace("[IMG_FRAME:1]", "🖼️ **[此处预留了 1 张产品大图的位置]**")
-            html_txt = html_txt.replace("[IMG_FRAME:2]", "🖼️ **[此处预留了 2 张产品小图的位置]**")
-            st.markdown(html_txt)
-
-if __name__ == "__main__":
-    main()
+    st.caption("导出 Word 后，可将以下提取的图片贴入图框中：")
+    for img_bytes in st.session_state.gallery_images:
+        try:
+            st.image(img_bytes, use_container_width=True)
+        except: pass
