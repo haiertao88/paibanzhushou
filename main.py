@@ -1,5 +1,5 @@
 import streamlit as st
-import os, json, re, threading, requests, tempfile, zipfile, io, base64
+import os, json, re, threading, requests, tempfile, zipfile, io, base64, hashlib
 from PIL import Image
 import streamlit.components.v1 as components
 
@@ -81,7 +81,7 @@ if 'app_config' not in st.session_state:
     st.session_state.txt_cn = ""
     st.session_state.txt_en = ""
     st.session_state.raw_text = ""
-    st.session_state.gallery_images = []
+    st.session_state.gallery_dict = {} # 升级为字典格式以支持插入 {hash: bytes}
     st.session_state.bg_cover_bytes = None
     st.session_state.bg_body_bytes = None
     st.session_state.current_lang = 'cn'
@@ -206,6 +206,30 @@ def generate_word_document(lang):
         lt = line.strip()
         if not lt: continue
         
+        # 1. 判断是否为插入的实体图片
+        local_img_m = re.match(r'^\[LOCAL_IMG:(.+?)\]$', lt)
+        if local_img_m:
+            img_hash = local_img_m.group(1)
+            img_bytes = st.session_state.gallery_dict.get(img_hash)
+            if img_bytes:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    tmp.write(img_bytes)
+                    tmp_path = tmp.name
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                try:
+                    p.add_run().add_picture(tmp_path, width=Mm(145)) # 控制宽度适配 A4
+                except: pass
+                os.unlink(tmp_path)
+            continue
+            
+        # 2. 占位图框
+        if 'IMG_FRAME' in lt:
+            p = doc.add_paragraph()
+            render_run(p, f"【排版预留：产品图片占位框】", st.session_state.body_size, True)
+            continue
+            
+        # 3. 表格
         if '|' in lt:
             if '---' in lt: continue
             cells = [clean_markdown(c) for c in lt.strip('|').split('|') if c.strip() != '']
@@ -225,16 +249,13 @@ def generate_word_document(lang):
                     tr = []; doc.add_paragraph()
             continue
 
+        # 4. 标题
         if is_header(lt):
             p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(12)
             render_run(p, clean_markdown(lt), st.session_state.title_size, True)
             continue
-            
-        if 'IMG_FRAME' in lt:
-            p = doc.add_paragraph()
-            render_run(p, f"【排版预留：产品图片占位框】", st.session_state.body_size, True)
-            continue
 
+        # 5. 普通正文及列表
         p = doc.add_paragraph()
         if lt.startswith(('-', '*', '•')):
             sym_val = BULLET_STYLES.get(st.session_state.bullet, "● ")
@@ -265,6 +286,7 @@ st.markdown("""
         border-radius: 4px !important;
     }
     .stDownloadButton > button { font-weight: bold; background-color: #007AFF; color: white; border: none; }
+    .btn-red > button { background-color: #FF3B30 !important; color: white !important; }
     
     /* 输入框与下拉框紧凑化 */
     .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { 
@@ -299,16 +321,32 @@ with col_left:
 
         st.markdown("<span style='font-size: 12px; color: #666;'>📂 导入文档(PDF/DOCX)</span>", unsafe_allow_html=True)
         doc_file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
-        if doc_file:
-            if st.button("🚀 提取资料与高清图片", use_container_width=True):
+        
+        # 将解析按钮与清空按钮放在一起
+        doc_btn_col1, doc_btn_col2 = st.columns([1.2, 1], gap="small")
+        if doc_btn_col1.button("🚀 提取资料与图片", use_container_width=True):
+            if doc_file:
                 with st.spinner("深度解析中..."):
                     if doc_file.name.endswith(".pdf"):
                         with pdfplumber.open(doc_file) as pdf:
                             st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
                     doc_file.seek(0)
                     extracted = extract_images_from_file(doc_file)
-                    st.session_state.gallery_images.extend(extracted)
-                st.success("解析成功！图片已入库。")
+                    for b in extracted:
+                        h = hashlib.md5(b).hexdigest()
+                        st.session_state.gallery_dict[h] = b
+                st.success("解析成功！图片已入图库。")
+            else:
+                st.warning("请先上传文档！")
+                
+        # 清空按钮功能
+        st.markdown("<div class='btn-red'>", unsafe_allow_html=True)
+        if doc_btn_col2.button("🗑️ 清空上一篇", use_container_width=True):
+            st.session_state.txt_cn = ""
+            st.session_state.txt_en = ""
+            st.session_state.raw_text = ""
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
         st.divider()
 
@@ -318,6 +356,9 @@ with col_left:
         st.checkbox("产品特点含简短说明", key="feature_brief")
         
         def do_ai_write_action(lang):
+            if not st.session_state.raw_text:
+                st.warning("请先提取资料内容！")
+                return
             feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
             prompt = f"资料：\n{st.session_state.raw_text[:6000]}\n\n要求：不输出产品名，以 **产品描述** 开头。严格使用标题：**产品描述** / **产品特点** / **产品指标** / **应用场景** / **使用说明**。\n注意：产品指标必须是Markdown表格。{feat_rule} 列表使用短横线 - 。" if lang == 'cn' else f"Source:\n{st.session_state.raw_text[:6000]}\n\nRules: Start with **Product Description**. Use EXACT headings: **Product Description** / **Product Features** / **Product Specifications** / **Applications** / **Instructions**.\nSpecs MUST be a Markdown table. Use '-' for lists."
             with st.spinner("Kimi 正在深度撰写中..."):
@@ -379,6 +420,17 @@ with col_mid:
         line = line.strip()
         if not line: continue
         
+        # 实时显示插入的真实图片
+        local_img_m = re.match(r'^\[LOCAL_IMG:(.+?)\]$', line)
+        if local_img_m:
+            img_hash = local_img_m.group(1)
+            img_bytes = st.session_state.gallery_dict.get(img_hash)
+            if img_bytes:
+                b64 = bytes_to_b64(img_bytes)
+                html_body += f'<div style="text-align:center; margin: 20px 0;"><img src="data:image/png;base64,{b64}" style="max-width: 80%; border: 1px solid #ddd; box-shadow: 0 4px 8px rgba(0,0,0,0.1); border-radius: 4px; padding: 5px;"/></div>'
+            continue
+            
+        # 表格渲染
         if '|' in line:
             if '---' in line: continue
             if not in_table:
@@ -394,14 +446,17 @@ with col_mid:
             html_body += '</table>'
             in_table = False
             
+        # 预留图框占位符
         if 'IMG_FRAME' in line:
             html_body += f'<div style="border:2px dashed #007AFF; padding: 40px; text-align: center; margin: 15px 0; background: rgba(0,122,255,0.05); color:#007AFF;"><b>🖼️ 产品图片排版预留区</b></div>'
             continue
             
+        # 标题渲染
         if is_header(line):
             html_body += f'<div style="margin-top:20px; margin-bottom:5px; font-size:{title_px}px; font-weight:bold;">{clean_markdown(line)}</div>'
             continue
             
+        # 列表与正文
         if line.startswith(('-', '*', '•')):
             sym = BULLET_STYLES.get(st.session_state.bullet, "●")
             if sym in ("__NUM__", "__DOT__"): sym = "- "
@@ -447,14 +502,22 @@ with col_right:
     if manual_upload:
         for f in manual_upload:
             bytes_data = f.getvalue()
-            if bytes_data not in st.session_state.gallery_images:
-                st.session_state.gallery_images.append(bytes_data)
+            h = hashlib.md5(bytes_data).hexdigest()
+            st.session_state.gallery_dict[h] = bytes_data
                 
+    st.markdown("<div class='btn-red'>", unsafe_allow_html=True)
     if st.button("🗑 清空图库", use_container_width=True):
-        st.session_state.gallery_images = []
+        st.session_state.gallery_dict = {}
         st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
         
-    st.caption("提取或上传的高清图片：")
-    for img_bytes in st.session_state.gallery_images:
-        try: st.image(img_bytes, use_container_width=True)
+    st.caption("点击下方按钮将图片插入正文：")
+    for img_hash, img_bytes in st.session_state.gallery_dict.items():
+        try: 
+            st.image(img_bytes, use_container_width=True)
+            if st.button("➕ 插入到正文", key=f"ins_{img_hash}", use_container_width=True):
+                target_key = 'txt_cn' if st.session_state.current_lang == 'cn' else 'txt_en'
+                # 追加图片标记到文案中
+                st.session_state[target_key] += f"\n\n[LOCAL_IMG:{img_hash}]\n\n"
+                st.rerun()
         except: pass
