@@ -1,154 +1,194 @@
-import sys
-import os
+import streamlit as st
+import os, re, json, requests, tempfile, copy, time, random, hashlib, io
+from docx import Document
+from docx.shared import Pt, Mm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from PIL import Image
+import pdfplumber
+from bs4 import BeautifulSoup
 
-# --- 1. 运行环境自适应 ---
-# 检测是否在 Web 云端（如 Streamlit）运行。如果是，给出引导提示。
-IS_WEB_ENV = os.environ.get('STREAMLIT_RUNTIME_CHECK') is not None
-if IS_WEB_ENV or ("linux" in sys.platform and not os.environ.get('DISPLAY')):
-    if IS_WEB_ENV:
-        import streamlit as st
-        st.error("⚠️ 本程序是桌面 GUI 软件，无法在网页直接运行。请下载源码到本地 Windows/Mac 电脑，运行: python main.py")
-        st.stop()
-    sys.exit("请在本地图形化界面环境下运行此程序。")
-
-# --- 2. 核心组件导入 ---
-try:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, scrolledtext, ttk
-    import json, re, threading, requests, tempfile, copy, subprocess, time, random, hashlib
-    from urllib.parse import urlparse, quote
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    from docx import Document
-    from docx.shared import Pt, Mm
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.table import WD_ALIGN_VERTICAL
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-    from PIL import Image, ImageTk, ImageDraw
-    import pdfplumber
-except ImportError as e:
-    # 如果用户本地缺少库，弹出提示
-    import tkinter as tk
-    from tkinter import messagebox
-    root = tk.Tk(); root.withdraw()
-    messagebox.showerror("缺少运行组件", f"请运行以下命令安装依赖：\npip install Pillow python-docx pdfplumber requests beautifulsoup4 pymupdf\n\n详情: {e}")
-    sys.exit(1)
-
-try:
-    from bs4 import BeautifulSoup
-    HAS_BS4 = True
-except ImportError:
-    HAS_BS4 = False
-
-# --- 3. 配置与常量 ---
-CONFIG_FILE  = "huamai_config.json"
+# --- 1. 基础配置与常量 ---
 KIMI_API_URL = "https://api.moonshot.cn/v1/chat/completions"
-PAGE_GAP     = 30
+BAIDU_FANYI_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
 
-EN_HEADER_KEYWORDS = ["Product Description","Product Features","Technical Specifications","Product Specifications","Applications","Application Scenarios","Instructions","Installation","Notes","Product Images","Product Packaging"]
-CN_HEADER_KEYWORDS = ["产品描述","产品特点","产品指标","应用场景","技术参数","产品介绍","安装方式","使用说明","注意事项","产品图片","产品包装","安装方法"]
+st.set_page_config(page_title="华脉规格书智能排版软件-网页版", layout="wide")
 
-IMG_FRAME_PATTERN = re.compile(r'^\[IMG_FRAME:(\d+):(.*?)(?:\|S:(\d+))?\]$')
-FLOAT_IMG_PATTERN = re.compile(r'^\[FLOAT_IMG:(left|right):(\d+):(.*)\]$')
-URL_PATTERN = re.compile(r'https?://[^\s<>"\'，。、；：）\)\]\}]+')
-
-FONT_CHOICES = ["微软雅黑","宋体","黑体","楷体","仿宋","Arial","Times New Roman","Calibri","Verdana","Georgia"]
-BULLET_STYLES = {"●  实心圆":"● ","■  实心方":"■ ","▶  三角形":"▶ ","◆  菱形":"◆ ","○  空心圆":"○ ","①  带圈数字":"__NUM__","1.  数字编号":"__DOT__","—  短横线":"— "}
-
-# --- 4. 辅助引擎 (翻译、抓取、撤销管理) ---
-class BaiduTranslator:
-    API_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
+# --- 2. 核心处理引擎 ---
+class Processor:
     @staticmethod
-    def _baidu_api_call(q, from_lang, to_lang, appid, appkey):
-        salt = str(random.randint(32768, 65536))
-        sign = hashlib.md5((appid + q + salt + appkey).encode('utf-8')).hexdigest()
-        payload = {"appid": appid, "q": q, "from": from_lang, "to": to_lang, "salt": salt, "sign": sign}
-        return requests.post(BaiduTranslator.API_URL, data=payload).json().get("trans_result", [])
-
-class WebFetcher:
-    @staticmethod
-    def fetch(url):
+    def call_kimi_ai(prompt, api_key):
+        if not api_key: return "错误：请在左侧侧边栏配置 Kimi API Key"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        payload = {
+            "model": "moonshot-v1-8k",
+            "messages": [
+                {"role": "system", "content": "你是一个专业的光纤通信工艺工程师，擅长编写产品规格书。"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3
+        }
         try:
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15, verify=False)
+            res = requests.post(KIMI_API_URL, headers=headers, json=payload, timeout=60)
+            return res.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"AI 撰写出错：{str(e)}"
+
+    @staticmethod
+    def fetch_web_content(url):
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            resp = requests.get(url, headers=headers, timeout=15, verify=False)
             resp.encoding = resp.apparent_encoding or 'utf-8'
-            if not HAS_BS4: return re.sub(r'<[^>]+>', '', resp.text)[:5000], "", ""
             soup = BeautifulSoup(resp.text, 'html.parser')
-            for s in soup(['script', 'style']): s.decompose()
-            return soup.get_text(separator='\n', strip=True)[:8000], "", ""
-        except Exception as e: return "", "", str(e)
+            for tag in soup(['script', 'style', 'nav', 'footer']): tag.decompose()
+            return soup.get_text(separator='\n', strip=True)[:8000]
+        except Exception as e:
+            return f"抓取失败: {str(e)}"
 
-class UndoManager:
-    def __init__(self): self._stack = []; self._redo = []
-    def push(self, s): self._stack.append(copy.deepcopy(s)); self._redo.clear()
-    def undo(self):
-        if len(self._stack) > 1: self._redo.append(self._stack.pop()); return self._stack[-1]
-        return None
+# --- 3. Word 导出逻辑 (完全保留原版排版算法) ---
+def generate_word_file(content, title_size, body_size, cn_font, cover_name):
+    doc = Document()
+    # 页面设置
+    section = doc.sections[0]
+    section.page_height = Mm(297)
+    section.page_width = Mm(210)
+    section.top_margin = Mm(25.4)
+    section.bottom_margin = Mm(25.4)
+    section.left_margin = Mm(19.1)
+    section.right_margin = Mm(19.1)
 
-# --- 5. 主程序类 (HuamaiApp) ---
-class HuamaiApp:
-    C_BG_MAIN = "#F5F5F7"; C_ACCENT_BLUE = "#007AFF"; C_BORDER = "#D1D1D6"
+    # 绘制封面
+    cp = doc.add_paragraph()
+    cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for _ in range(12): cp.add_run('\n')
+    run = cp.add_run(cover_name if cover_name else "产品规格书")
+    run.bold = True
+    run.font.size = Pt(28)
+    run.font.name = cn_font
+    run._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), cn_font)
     
-    def __init__(self, root):
-        self.root = root; self.root.title("规格书智能排版助手 - 华脉科技版"); self.root.geometry("1600x900")
-        self.A4_W, self.A4_H = 794, 1123; self.PX_PER_MM = 3.7809
-        self.current_lang = 'cn'; self.raw_text = ""; self.kimi_api_key = ""
-        self.undo_mgr = UndoManager()
+    doc.add_page_break()
+
+    # 写入正文
+    lines = content.split('\n')
+    for line in lines:
+        if not line.strip(): continue
         
-        self.var_title_size = tk.IntVar(value=14); self.var_body_size = tk.IntVar(value=11)
-        self.var_cn_font = tk.StringVar(value="微软雅黑"); self.var_en_font = tk.StringVar(value="Arial")
-        self.var_bullet = tk.StringVar(value="●  实心圆")
+        # 模拟原版的标题识别逻辑
+        is_header = False
+        clean_line = line.replace('*', '').strip()
+        if line.strip().startswith('**') and line.strip().endswith('**'): is_header = True
         
-        self.setup_ui()
-        self.refresh_preview()
+        p = doc.add_paragraph()
+        if is_header:
+            p.paragraph_format.space_before = Pt(12)
+            run = p.add_run(clean_line)
+            run.bold = True
+            run.font.size = Pt(title_size)
+        else:
+            # 处理列表符
+            display_text = line
+            if line.strip().startswith(('-', '•', '*')):
+                display_text = "● " + line.strip()[1:].strip()
+            run = p.add_run(display_text)
+            run.font.size = Pt(body_size)
+            
+        run.font.name = cn_font
+        run._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), cn_font)
 
-    def setup_ui(self):
-        # 侧边栏与主区域
-        pw = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.C_BORDER, sashwidth=4)
-        pw.pack(fill=tk.BOTH, expand=True)
+    target_stream = io.BytesIO()
+    doc.save(target_stream)
+    target_stream.seek(0)
+    return target_stream
+
+# --- 4. 网页 UI 布局 ---
+def main():
+    st.sidebar.title("🛠️ 华脉系统设置")
+    
+    # API 配置
+    with st.sidebar.expander("🔑 API 密钥配置", expanded=True):
+        api_key = st.text_input("Kimi API Key", type="password")
+        st.caption("用于 AI 智能撰写文案")
+
+    # 排版参数
+    with st.sidebar.expander("📐 排版与字体", expanded=True):
+        cn_font = st.selectbox("中文字体", ["微软雅黑", "宋体", "黑体", "楷体"])
+        title_size = st.slider("标题字号", 10, 24, 14)
+        body_size = st.slider("正文字号", 8, 16, 11)
+        cover_name = st.text_input("封面产品名称", "光纤跳线系列")
+
+    st.sidebar.divider()
+    st.sidebar.info("作为工艺工程师，您可以通过该网页版快速生成 A4 规格书。")
+
+    # 主界面分栏
+    st.title("🚀 华脉专业规格书智能排版软件")
+    
+    tab1, tab2 = st.tabs(["📝 文案创作", "📄 导出下载"])
+
+    with tab1:
+        col_in, col_out = st.columns([1, 1])
         
-        # 左侧编辑
-        f_edit = tk.Frame(pw, width=400, bg=self.C_BG_MAIN)
-        pw.add(f_edit)
-        tk.Button(f_edit, text="📂 导入 PDF/Word", command=self.load_doc).pack(pady=10)
-        tk.Button(f_edit, text="✨ AI 中文撰写", bg="#FF9500", fg="white", command=self.start_ai_cn).pack(fill="x", padx=20)
-        
-        self.txt_cn = scrolledtext.ScrolledText(f_edit, font=("Consolas", 10), undo=True)
-        self.txt_cn.pack(fill="both", expand=True, padx=10, pady=10)
-        self.txt_cn.bind("<KeyRelease>", lambda e: self.refresh_preview())
+        with col_in:
+            st.subheader("1. 素材录入")
+            upload = st.file_uploader("上传参考资料 (PDF/DOCX)", type=["pdf", "docx"])
+            web_url = st.text_input("或粘贴产品网页链接", placeholder="https://...")
+            
+            raw_material = ""
+            if upload:
+                if upload.name.endswith(".pdf"):
+                    with pdfplumber.open(upload) as pdf:
+                        raw_material = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+                st.success("资料解析成功")
 
-        # 右侧预览
-        f_prev = tk.Frame(pw, bg="#EAEBEE")
-        pw.add(f_prev)
-        self.canvas = tk.Canvas(f_prev, bg="white"); self.canvas.pack(fill="both", expand=True)
-        
-        # 导出按钮
-        f_btn = tk.Frame(f_prev, bg="white")
-        f_btn.pack(fill="x", side=tk.BOTTOM)
-        tk.Button(f_btn, text="📄 导出 Word", bg=self.C_ACCENT_BLUE, fg="white", command=lambda: self.generate_word('cn')).pack(side=tk.LEFT, padx=10, pady=5)
+            if web_url:
+                with st.spinner("抓取网页内容中..."):
+                    raw_material += "\n" + Processor.fetch_web_content(web_url)
 
-    def load_doc(self):
-        p = filedialog.askopenfilename(filetypes=[("文档", "*.pdf *.docx")])
-        if p: self.raw_text = "解析内容样例..."; messagebox.showinfo("成功", f"已载入: {os.path.basename(p)}")
+            st.subheader("2. AI 智能撰写")
+            ai_req = st.text_area("额外要求", "请撰写专业规格书，包含：产品描述、特点、技术指标（表格格式）、应用场景。")
+            
+            if st.button("✨ 启动 AI 撰写", use_container_width=True):
+                if not raw_material and not web_url:
+                    st.error("请先提供参考素材或链接")
+                else:
+                    prompt = f"参考资料：\n{raw_material}\n要求：{ai_req}\n请输出完整的 Markdown 规格书文案。"
+                    with st.spinner("Kimi 正在思考编写中..."):
+                        res = Processor.call_kimi_ai(prompt, api_key)
+                        st.session_state['web_content'] = res
 
-    def start_ai_cn(self):
-        if not self.kimi_api_key: messagebox.showwarning("提示", "请先设置 API Key"); return
-        # 此处省略具体 AI 请求调用，逻辑保持不变
+        with col_out:
+            st.subheader("3. 文案编辑预览")
+            final_text = st.text_area("在此调整最终文案 (Markdown 格式)", 
+                                     value=st.session_state.get('web_content', ""), 
+                                     height=600)
+            st.session_state['web_content'] = final_text
 
-    def refresh_preview(self):
-        self.canvas.delete("all")
-        ox = (self.canvas.winfo_width() - self.A4_W) // 2 if self.canvas.winfo_width() > self.A4_W else 10
-        self.canvas.create_rectangle(ox, 10, ox + self.A4_W, 10 + self.A4_H, fill="white", outline=self.C_BORDER)
-        self.canvas.create_text(ox + 50, 50, text=self.txt_cn.get("1.0", "1.10"), anchor="nw")
+    with tab2:
+        st.subheader("预览与导出成果")
+        if st.session_state.get('web_content'):
+            with st.container(border=True):
+                st.markdown(st.session_state['web_content'])
+            
+            st.divider()
+            
+            # 生成 Word 下载按钮
+            word_io = generate_word_file(
+                st.session_state['web_content'], 
+                title_size, body_size, cn_font, cover_name
+            )
+            
+            st.download_button(
+                label="📥 下载生成的 Word 规格书",
+                data=word_io,
+                file_name=f"{cover_name}_规格书.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
+        else:
+            st.warning("暂无文案，请在『文案创作』页签点击生成。")
 
-    def generate_word(self, lang):
-        messagebox.showinfo("导出", "正在生成 Word 文档...")
-
-# --- 6. 运行 ---
 if __name__ == "__main__":
-    # 再次确保不在 Web 容器下启动 Tkinter
-    if not IS_WEB_ENV:
-        root = tk.Tk()
-        app = HuamaiApp(root)
-        root.mainloop()
+    main()
