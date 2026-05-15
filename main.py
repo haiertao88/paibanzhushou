@@ -43,8 +43,7 @@ def load_config():
         'font_cn': "微软雅黑", 'font_en': "Arial", 'title_size': 14, 'body_size': 11,
         'cover_cn': "光纤跳线系列", 'cover_en': "Fiber Optic Patch Cord",
         'bullet': "● 实心圆", 'feature_brief': True,
-        'prompt_cn': "请根据以下资料撰写专业规格书...\n要求：必须使用 Markdown 表格输出产品指标。",
-        'prompt_en': "Write an English spec sheet from the source material...\nSpecs MUST be a Markdown table."
+        'prompt_cn': "", 'prompt_en': ""
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -72,7 +71,7 @@ def save_config():
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False)
-        st.toast("✅ 系统配置与API密钥已持久保存！")
+        st.toast("✅ 系统配置已持久保存！")
     except Exception as e:
         st.error(f"保存失败: {e}")
 
@@ -91,7 +90,7 @@ if 'app_config' not in st.session_state:
     st.session_state.current_lang = 'cn'
 
 # ═══════════════════════════════════════════
-# 3. 核心文件解析与 AI 函数 (修复文本缺失问题)
+# 3. 核心提取与 AI 引擎
 # ═══════════════════════════════════════════
 def clean_markdown(t):
     if not t: return ""
@@ -105,33 +104,6 @@ def is_header(raw_line):
     if re.match(r'^\*\*.+\*\*$', raw_line) and not raw_line.startswith(('-','*','|')): return True
     return False
 
-# 解析文档文本 (PDF + DOCX)
-def extract_text_from_file(uploaded_file):
-    content = []
-    try:
-        if uploaded_file.name.endswith(".pdf"):
-            with pdfplumber.open(uploaded_file) as pdf:
-                for pg in pdf.pages:
-                    t = pg.extract_text()
-                    if t: content.append(t)
-                    # 尝试提取PDF中的表格
-                    for tbl in pg.extract_tables():
-                        content.append("\n[表格数据]")
-                        for row in tbl: 
-                            content.append("| " + " | ".join(str(c).replace('\n', ' ') for c in row if c is not None) + " |")
-        elif uploaded_file.name.endswith((".docx", ".doc")):
-            doc = Document(uploaded_file)
-            for para in doc.paragraphs:
-                if para.text.strip(): content.append(para.text)
-            for tbl in doc.tables:
-                content.append("\n[表格数据]")
-                for row in tbl.rows:
-                    content.append("| " + " | ".join(c.text.replace('\n', ' ') for c in row.cells) + " |")
-    except Exception as e:
-        st.error(f"文本提取错误: {e}")
-    return "\n".join(content)
-
-# 解析文档图片
 def extract_images_from_file(uploaded_file):
     imgs = []
     if uploaded_file.name.endswith(".pdf"):
@@ -155,7 +127,7 @@ def bytes_to_b64(b):
     if not b: return ""
     return base64.b64encode(b).decode('utf-8')
 
-# --- AI 撰写强校验拦截 ---
+# --- 核心拦截与防乱编机制 ---
 def perform_ai_write(lang):
     if not st.session_state.kimi_key:
         st.toast("❌ 请先在左侧【⚙️ 系统设置】中配置 Kimi API Key。", icon="❌")
@@ -163,11 +135,10 @@ def perform_ai_write(lang):
         
     raw = st.session_state.get('raw_text', '').strip()
     if not raw:
-        st.toast("❌ 缺少底层参考资料！请先上传文档并点击【提取资料】", icon="❌")
+        st.toast("❌ 警告：未检测到基础资料！请先上传文档并点击【提取资料】", icon="❌")
         return
     
-    # 加入强约束指令，防止乱编
-    anti_hallucination = "请务必【严格基于以上资料】进行提炼和排版，绝不可凭空捏造产品参数。"
+    anti_hallucination = "务必严格基于提供的资料提炼排版，绝不可凭空捏造产品参数。"
     
     if lang == 'cn':
         feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
@@ -195,7 +166,7 @@ def perform_ai_write(lang):
         st.toast(f"❌ AI 接口异常: {str(e)}", icon="❌")
 
 # ═══════════════════════════════════════════
-# 4. Word 导出算法
+# 4. 极致完善的 Word 导出算法
 # ═══════════════════════════════════════════
 def _add_word_bg(section, bg_bytes):
     if not bg_bytes: return
@@ -231,7 +202,6 @@ def generate_word_document(lang):
     doc.styles['Normal'].font.name = fn
     if lang == 'cn': doc.styles['Normal']._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 封面
     if st.session_state.bg_cover_bytes: _add_word_bg(sec, st.session_state.bg_cover_bytes)
     cp = doc.add_paragraph(); cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for _ in range(12): cp.add_run('\n')
@@ -240,7 +210,6 @@ def generate_word_document(lang):
     rn.bold = True; rn.font.size = Pt(max(st.session_state.title_size + 14, 24)); rn.font.name = fn
     if lang == 'cn': rn._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 正文
     doc.add_page_break()
     bs = doc.add_section() 
     bs.header.is_linked_to_previous = False 
@@ -260,7 +229,7 @@ def generate_word_document(lang):
         lt = line.strip()
         if not lt: continue
         
-        # 渲染真实图片
+        # 1. 渲染图库真实图片
         local_img_m = re.match(r'^\[LOCAL_IMG:(.+?)\]$', lt)
         if local_img_m:
             img_hash = local_img_m.group(1)
@@ -276,11 +245,13 @@ def generate_word_document(lang):
                 os.unlink(tmp_path)
             continue
             
+        # 2. 占位图框
         if 'IMG_FRAME' in lt:
             p = doc.add_paragraph()
             render_run(p, f"【排版预留：产品图片占位框】", st.session_state.body_size, True)
             continue
             
+        # 3. 表格
         if '|' in lt:
             if '---' in lt: continue
             cells = [clean_markdown(c) for c in lt.strip('|').split('|') if c.strip() != '']
@@ -300,11 +271,13 @@ def generate_word_document(lang):
                     tr = []; doc.add_paragraph()
             continue
 
+        # 4. 标题
         if is_header(lt):
             p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(12)
             render_run(p, clean_markdown(lt), st.session_state.title_size, True)
             continue
 
+        # 5. 普通正文
         p = doc.add_paragraph()
         if lt.startswith(('-', '*', '•')):
             sym_val = BULLET_STYLES.get(st.session_state.bullet, "● ")
@@ -319,18 +292,17 @@ def generate_word_document(lang):
     return target_stream
 
 # ═══════════════════════════════════════════
-# 5. UI 交互布局
+# 5. 沉浸式 UI 布局
 # ═══════════════════════════════════════════
 st.markdown("""
     <style>
     .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; max-width: 98% !important; }
     div[data-testid="stHorizontalBlock"] { gap: 0.5rem !important; align-items: center !important; margin-bottom: -10px !important;}
-    .stButton > button, .stDownloadButton > button, .stPopover > button {
-        font-size: 13px !important; padding: 2px 8px !important; min-height: 32px !important; height: 32px !important; border-radius: 4px !important; border: 1px solid #d1d1d6;
-    }
+    .stButton > button, .stDownloadButton > button, .stPopover > button { font-size: 13px !important; padding: 2px 8px !important; min-height: 32px !important; height: 32px !important; border-radius: 4px !important; border: 1px solid #d1d1d6; }
     .stDownloadButton > button { font-weight: bold; background-color: #FF3B30; color: white; border: none; }
     .btn-blue > button { background-color: #007AFF !important; color: white !important; font-weight: bold; }
     .btn-green > button { background-color: #34C759 !important; color: white !important; font-weight: bold; }
+    .btn-red > button { background-color: #FF3B30 !important; color: white !important; font-weight: bold; }
     .stTextInput, .stNumberInput, .stSelectbox { display: flex; flex-direction: row; align-items: center; gap: 5px; }
     .stTextInput label, .stNumberInput label, .stSelectbox label { font-size: 13px !important; min-width: max-content; margin-bottom: 0 !important; }
     .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { font-size: 13px !important; min-height: 32px !important; height: 32px !important; }
@@ -346,43 +318,49 @@ col_left, col_mid, col_right = st.columns([1.3, 2.7, 0.8], gap="medium")
 # ----------------- 【左侧】文档导入与 AI 撰写区 -----------------
 with col_left:
     with st.container(border=True):
-        st.markdown("**1. 基础配置与资料库**")
+        st.markdown("**1. 基础配置**")
         
+        # 核心：纯净且稳定的文本解析逻辑回退
         st.markdown("<span style='font-size: 12px; color: #666;'>📂 导入文档(PDF/DOCX) 解析底层资料</span>", unsafe_allow_html=True)
         doc_file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
         
-        c_p1, c_p2 = st.columns([1, 1])
-        if c_p1.button("🚀 提取资料与高清图片", use_container_width=True):
+        doc_btn_col1, doc_btn_col2 = st.columns([1.2, 1], gap="small")
+        if doc_btn_col1.button("🚀 提取资料与图片", use_container_width=True):
             if doc_file:
-                with st.spinner("深度解析文本与表格中..."):
-                    # 核心修复：执行完整的文本和表格解析
+                with st.spinner("深度解析文本与图片中..."):
+                    st.session_state.raw_text = ""
+                    # PDF 纯净提取，绝不含易错的表格提取
+                    if doc_file.name.endswith(".pdf"):
+                        with pdfplumber.open(doc_file) as pdf:
+                            st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+                    elif doc_file.name.endswith((".docx", ".doc")):
+                        try:
+                            doc_obj = Document(doc_file)
+                            st.session_state.raw_text = "\n".join([p.text for p in doc_obj.paragraphs if p.text.strip()])
+                        except Exception as e:
+                            st.error(f"Word 解析错误: {e}")
+                            
                     doc_file.seek(0)
-                    extracted_text = extract_text_from_file(doc_file)
-                    st.session_state.raw_text = extracted_text
-                    
-                    doc_file.seek(0)
-                    extracted_imgs = extract_images_from_file(doc_file)
-                    for b in extracted_imgs:
+                    extracted = extract_images_from_file(doc_file)
+                    for b in extracted:
                         h = hashlib.md5(b).hexdigest()
                         st.session_state.gallery_dict[h] = b
                         
                 if st.session_state.raw_text:
-                    st.success(f"解析成功！提取文字 {len(st.session_state.raw_text)} 个，图片已入图库。")
+                    st.success(f"解析成功！已提取 {len(st.session_state.raw_text)} 字。")
                 else:
-                    st.warning("解析完成，但未识别出文本。若为全图片PDF，AI将无法读取内容。")
+                    st.warning("⚠️ 警告：提取不到文本！AI将无法生成。如果这是扫描版PDF，请补充提示词。")
             else:
                 st.warning("请先上传文档！")
                 
-        if c_p2.button("🗑️ 清空上一篇文案", use_container_width=True):
+        st.markdown("<div class='btn-red'>", unsafe_allow_html=True)
+        if doc_btn_col2.button("🗑️ 清空上一篇", use_container_width=True):
             st.session_state.txt_cn = ""; st.session_state.txt_en = ""; st.session_state.raw_text = ""
             st.rerun()
-
-        # 核心修复：可视化展示提取的文本，确保用户和AI都知道数据在哪
-        with st.expander("👀 查看已解析的底层参考资料 (发给AI分析的数据)"):
-            if st.session_state.raw_text:
-                st.text(st.session_state.raw_text[:2000] + ("\n...(内容过长已折叠)..." if len(st.session_state.raw_text)>2000 else ""))
-            else:
-                st.info("暂未提取到文本。")
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        with st.expander("👀 查看已提取的资料底稿 (发给AI参考的数据)"):
+            st.text(st.session_state.raw_text[:2000] if st.session_state.raw_text else "暂无文本数据。")
 
         st.divider()
 
@@ -403,61 +381,43 @@ with col_left:
         bc2.button("🌐 AI EN Writing", on_click=perform_ai_write, args=('en',), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    tab_cn, tab_en, tab_prompt = st.tabs(["中文文案", "English Copy", "自定义提示词"])
-    with tab_cn:
-        st.text_area("编辑内容", key="txt_cn", height=450, label_visibility="collapsed")
-    with tab_en:
-        st.text_area("EN Edit", key="txt_en", height=450, label_visibility="collapsed")
+    tab_cn, tab_en, tab_prompt = st.tabs(["中文文案", "English Copy", "自定义要求"])
+    with tab_cn: st.text_area("编辑内容", key="txt_cn", height=420, label_visibility="collapsed")
+    with tab_en: st.text_area("EN Edit", key="txt_en", height=420, label_visibility="collapsed")
     with tab_prompt:
-        st.text_area("中文自定义提示词", key="prompt_cn", height=150)
-        st.text_area("英文自定义提示词", key="prompt_en", height=150)
-        st.caption("提示：在上述文本框输入额外要求后，点击 AI 撰写按钮生效。")
+        st.text_area("中文额外要求", key="prompt_cn", height=150)
+        st.text_area("英文额外要求", key="prompt_en", height=150)
 
 # ----------------- 【中间】排版预览区 -----------------
 with col_mid:
     with st.container(border=True):
         st.markdown("**📄 预览与排版区**")
         
-        t1, t2, t3, t4, t5, t6 = st.columns([1, 1, 0.8, 0.8, 1, 1])
-        t1.selectbox("中文", FONT_CHOICES, key="font_cn")
-        t2.selectbox("英文", FONT_CHOICES, key="font_en")
-        t3.number_input("标题", 8, 36, key="title_size")
-        t4.number_input("正文", 6, 24, key="body_size")
-        t5.selectbox("符号", list(BULLET_STYLES.keys()), key="bullet")
-        if t6.button("↺ 重置样式", use_container_width=True):
-            st.session_state.font_cn = "微软雅黑"; st.session_state.title_size = 14
-            st.session_state.body_size = 11; st.session_state.bullet = "● 实心圆"
-            st.rerun()
-
-        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-        b1, b2, b3, b4, b5, b6, b7 = st.columns([0.6, 0.8, 0.8, 0.8, 0.8, 0.8, 1.2])
-        b1.markdown("<span style='font-size:13px; line-height:32px;'>📷 图框:</span>", unsafe_allow_html=True)
-        if b2.button("1 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
-        if b3.button("2 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
-        if b4.button("3 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:3]"
-        if b5.button("4 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:4]"
-        if b6.button("6 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:6]"
-        if b7.button("✕ 清除全部图框"):
-            st.session_state.txt_cn = re.sub(r'\[IMG_FRAME:\d+\]', '', st.session_state.txt_cn)
-            st.rerun()
-
-        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.5, 1])
-        if c1.button("🔀 行列互换"): st.toast("网页端暂不支持单表反转")
-        if c2.button("✂️ 去说明"): st.toast("一键去说明：请在左侧文本框手动调整。")
-        if c3.button("🔄 去序号"): st.toast("系统已强制应用无序号符号！")
-        with c4.popover("🖼️ 设置导出Word背景", use_container_width=True):
-            st.caption("设置导出的A4底图")
-            cover_upload = st.file_uploader("1. 封面图 (A4)", type=['png','jpg'], label_visibility="collapsed")
+        tc1, tc2, tc3, tc4, tc5 = st.columns([1, 0.8, 0.8, 1, 1.2])
+        tc1.selectbox("字体", FONT_CHOICES, key="font_cn", label_visibility="collapsed")
+        tc2.number_input("标题", 8, 36, key="title_size")
+        tc3.number_input("正文", 6, 24, key="body_size")
+        tc4.selectbox("符号", list(BULLET_STYLES.keys()), key="bullet")
+        
+        with tc5.popover("🖼️ 背景图设置"):
+            cover_upload = st.file_uploader("1. 封面图 (A4)", type=['png','jpg'])
             if cover_upload: st.session_state.bg_cover_bytes = cover_upload.getvalue()
-            body_upload = st.file_uploader("2. 正文图 (A4)", type=['png','jpg'], label_visibility="collapsed")
+            body_upload = st.file_uploader("2. 正文水印图 (A4)", type=['png','jpg'])
             if body_upload: st.session_state.bg_body_bytes = body_upload.getvalue()
             if st.button("🗑️ 清空所有背景", use_container_width=True):
                 st.session_state.bg_cover_bytes = None; st.session_state.bg_body_bytes = None
-        
-        c5.download_button("📥 导出中文 Word", data=generate_word_document('cn'), file_name=f"{st.session_state.cover_cn}.docx", use_container_width=True)
 
-    # ---------------- 核心：独立 HTML A4 实时高保真渲染引擎 ----------------
+        st.divider()
+        tb1, tb2, tb3, tb4, tb5, tb6 = st.columns([1,1,1,1,2,2])
+        if tb1.button("📸 1 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
+        if tb2.button("📸 2 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
+        if tb3.button("✂️ 去说明"): st.toast("请在左侧文本框手动调整。")
+        if tb4.button("🔄 去序号"): st.toast("系统已强制应用无序号符号！")
+        
+        tb5.download_button("📥 导出 中文 Word", data=generate_word_document('cn'), file_name=f"{st.session_state.cover_cn}.docx", type="primary", use_container_width=True)
+        tb6.download_button("📥 导出 English Word", data=generate_word_document('en'), file_name=f"{st.session_state.cover_en}.docx", type="primary", use_container_width=True)
+
+    # ---------------- 核心：A4 HTML 高保真渲染引擎 ----------------
     preview_txt = st.session_state.txt_cn if st.session_state.current_lang == 'cn' else st.session_state.txt_en
     cover_title = st.session_state.cover_cn if st.session_state.current_lang == 'cn' else st.session_state.cover_en
     font_family = st.session_state.font_cn if st.session_state.current_lang == 'cn' else st.session_state.font_en
@@ -494,7 +454,7 @@ with col_mid:
             html_body += '</table>'; in_table = False
             
         if 'IMG_FRAME' in line:
-            html_body += f'<div style="border:2px dashed #007AFF; padding: 30px; text-align: center; margin: 15px 0; background: rgba(0,122,255,0.05); color:#007AFF;"><b>🖼️ 排版预留占位框</b></div>'
+            html_body += f'<div style="border:2px dashed #007AFF; padding: 40px; text-align: center; margin: 15px 0; background: rgba(0,122,255,0.05); color:#007AFF;"><b>🖼️ 产品图片排版预留区</b></div>'
             continue
             
         if is_header(line):
@@ -524,41 +484,47 @@ with col_mid:
             .cover {{ height: 1123px; display: flex; align-items: center; justify-content: center; {cv_bg} }}
             .body-page {{ min-height: 1123px; padding: 96px 72px; text-align: left; {bd_bg} font-size: {body_px}px; color: #1D1D1F; line-height: 1.6; }}
             table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
-            td, th {{ border: 1px solid #000; padding: 8px; text-align: center; font-size: {body_px}px; }}
+            td, th {{ border: 1px solid #000; padding: 8px; text-align: center; }}
         </style>
     </head>
     <body>
-        <div class="a4-page cover"><h1 style="font-size: 3.5em; color: #1D1D1F;">{cover_title}</h1></div>
-        <div class="a4-page body-page">{html_body}</div>
+        <div class="a4-page cover">
+            <h1 style="font-size: 3.5em; color: #1D1D1F;">{cover_title}</h1>
+        </div>
+        <div class="a4-page body-page">
+            {html_body}
+        </div>
     </body>
     </html>
     """
-    components.html(iframe_html, height=720, scrolling=True)
+    components.html(iframe_html, height=730, scrolling=True)
 
-# ----------------- 【右侧】图库与可视化插入 -----------------
+# ----------------- 【右侧】图库 -----------------
 with col_right:
-    with st.container(border=True):
-        st.markdown("**📷 图库**")
-        manual_upload = st.file_uploader("＋ 上传图片", accept_multiple_files=True, type=['png','jpg','jpeg'], label_visibility="collapsed")
-        if manual_upload:
-            for f in manual_upload:
-                bytes_data = f.getvalue()
-                h = hashlib.md5(bytes_data).hexdigest()
+    st.markdown("### 📷 图库")
+    manual_upload = st.file_uploader("＋ 上传图片", accept_multiple_files=True, type=['png','jpg','jpeg'], label_visibility="collapsed")
+    if manual_upload:
+        for f in manual_upload:
+            bytes_data = f.getvalue()
+            h = hashlib.md5(bytes_data).hexdigest()
+            if h not in st.session_state.gallery_dict:
                 st.session_state.gallery_dict[h] = bytes_data
-                    
-        if st.button("🗑 清空图库", use_container_width=True):
-            st.session_state.gallery_dict = {}
-            st.rerun()
-            
-        st.caption("点击下方按钮将图片插入正文：")
-        for img_hash, img_bytes in st.session_state.gallery_dict.items():
-            try: 
-                st.image(img_bytes, use_container_width=True)
-                st.markdown("<div class='btn-green'>", unsafe_allow_html=True)
-                if st.button("➕ 插入至文末", key=f"ins_{img_hash}", use_container_width=True):
-                    target_key = 'txt_cn' if st.session_state.current_lang == 'cn' else 'txt_en'
-                    st.session_state[target_key] += f"\n\n[LOCAL_IMG:{img_hash}]\n\n"
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-                st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
-            except: pass
+                
+    st.markdown("<div class='btn-red'>", unsafe_allow_html=True)
+    if st.button("🗑 清空图库", use_container_width=True):
+        st.session_state.gallery_dict = {}
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+        
+    st.caption("点击下方按钮插入图片：")
+    for img_hash, img_bytes in st.session_state.gallery_dict.items():
+        try: 
+            st.image(img_bytes, use_container_width=True)
+            st.markdown("<div class='btn-green'>", unsafe_allow_html=True)
+            if st.button("➕ 插入到正文", key=f"ins_{img_hash}", use_container_width=True):
+                target_key = 'txt_cn' if st.session_state.current_lang == 'cn' else 'txt_en'
+                st.session_state[target_key] += f"\n\n[LOCAL_IMG:{img_hash}]\n\n"
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+        except: pass
