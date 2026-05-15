@@ -31,9 +31,10 @@ EN_HEADER_KEYWORDS = ["Product Description","Product Features","Technical Specif
 
 FONT_CHOICES = ["微软雅黑","宋体","黑体","楷体","仿宋","Arial","Times New Roman","Calibri","Verdana","Georgia"]
 BULLET_STYLES = {"● 实心圆":"● ", "■ 实心方":"■ ", "▶ 三角形":"▶ ", "◆ 菱形":"◆ ", "○ 空心圆":"○ ", "① 带圈数字":"__NUM__", "1. 数字编号":"__DOT__", "— 短横线":"— "}
+LANGUAGES = {"自动检测":"auto", "中文":"zh", "英语":"en", "日语":"jp", "韩语":"kor", "法语":"fra", "德语":"de", "俄语":"ru", "西班牙语":"spa"}
 
 # ═══════════════════════════════════════════
-# 2. 状态管理与配置保存 (解决刷新丢失问题)
+# 2. 状态管理与配置保存
 # ═══════════════════════════════════════════
 def load_config():
     defaults = {
@@ -66,7 +67,7 @@ def save_config():
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False)
-        st.toast("✅ 系统配置与API密钥已保存！")
+        st.toast("✅ 系统配置与API密钥已持久保存！")
     except Exception as e:
         st.error(f"保存失败: {e}")
 
@@ -142,11 +143,11 @@ def _add_word_bg(section, bg_bytes):
     hdr = section.header
     hdr.is_linked_to_previous = False
     
-    # 清理遗留的段落，防止继承上一节的背景
-    for p in hdr.paragraphs:
-        p._element.getparent().remove(p._element)
+    if not hdr.paragraphs:
+        hdr.add_paragraph()
         
-    p = hdr.add_paragraph()
+    p = hdr.paragraphs[0]
+    p.clear() # 安全清除，防止遗留
     run = p.add_run()
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -177,8 +178,10 @@ def generate_word_document(lang):
     doc.styles['Normal'].font.name = fn
     if lang == 'cn': doc.styles['Normal']._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 1. 封面
-    if st.session_state.bg_cover_bytes: _add_word_bg(sec, st.session_state.bg_cover_bytes)
+    # 1. 封面独立设置
+    if st.session_state.bg_cover_bytes: 
+        _add_word_bg(sec, st.session_state.bg_cover_bytes)
+        
     cp = doc.add_paragraph(); cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for _ in range(12): cp.add_run('\n')
     cover_title = st.session_state.cover_cn if lang == 'cn' else st.session_state.cover_en
@@ -186,17 +189,14 @@ def generate_word_document(lang):
     rn.bold = True; rn.font.size = Pt(max(st.session_state.title_size + 14, 24)); rn.font.name = fn
     if lang == 'cn': rn._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 2. 正文
-    doc.add_page_break()
+    # 2. 正文独立设置（取消 add_page_break，直接 add_section 防止空白页）
     bs = doc.add_section()
-    bs.header.is_linked_to_previous = False
+    bs.header.is_linked_to_previous = False # 核心修复：强制切断封面图继承
     
     if st.session_state.bg_body_bytes:
         _add_word_bg(bs, st.session_state.bg_body_bytes)
     else:
-        # 如果没有正文背景，必须清空，否则会继承封面！
-        for p in bs.header.paragraphs:
-            p._element.getparent().remove(p._element)
+        if bs.header.paragraphs: bs.header.paragraphs[0].clear() # 确保没有背景
     
     lines = txt.split('\n')
     tr = [] 
@@ -259,18 +259,23 @@ def generate_word_document(lang):
 # ═══════════════════════════════════════════
 # 5. UI 交互布局 (高度还原 Windows 版本)
 # ═══════════════════════════════════════════
-# CSS 样式注入：控制页面紧凑，美化文本框
+# CSS 样式注入：控制页面紧凑，美化文本框与A4纸张
 st.markdown("""
     <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 0rem; padding-left: 2rem; padding-right: 2rem; max-width: 98%; }
     .stTextArea textarea { font-family: Consolas, monospace; font-size: 14px; background-color: #ffffff; border: 1px solid #d1d1d6; }
     .header-text { font-size: 22px; font-weight: bold; color: #1D1D1F; margin-bottom: 10px; }
+    
+    /* 桌面式 A4 纸张容器设计 */
+    .desk-bg { background-color: #EAEBEE; padding: 30px 10px; text-align: center; border-radius: 8px; border: 1px solid #D1D1D6; box-shadow: inset 0 2px 5px rgba(0,0,0,0.05); overflow-y: auto; max-height: 800px; }
+    .a4-page { background-color: white; width: 100%; max-width: 794px; min-height: 1123px; margin: 0 auto 30px auto; padding: 96px 72px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); text-align: left; position: relative; background-size: 100% 100%; background-position: center; }
+    .a4-cover { display: flex; align-items: center; justify-content: center; text-align: center; }
     </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-text">📄 华脉规格书专业排版系统 - 现代沉浸版</div>', unsafe_allow_html=True)
 
-# 定义三列核心布局：左侧编辑(1.2), 中间排版与预览(2.5), 右侧图库(0.8)
+# 三列黄金布局
 col_left, col_mid, col_right = st.columns([1.2, 2.5, 0.8], gap="medium")
 
 # ----------------- 【左侧】文本与参数 & AI -----------------
@@ -278,11 +283,27 @@ with col_left:
     with st.container(border=True):
         st.markdown("**1. 基础配置**")
         
+        # 将导入按钮提至最高层级，最醒目
+        st.markdown("<span style='font-size: 13px; color: #666;'>📂 上传参考文档解析 (自动存入右侧图库)</span>", unsafe_allow_html=True)
+        doc_file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
+        if doc_file:
+            if st.button("🚀 开始解析文档内容与图片", use_container_width=True):
+                with st.spinner("解析资料中..."):
+                    if doc_file.name.endswith(".pdf"):
+                        with pdfplumber.open(doc_file) as pdf:
+                            st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+                    doc_file.seek(0)
+                    extracted = extract_images_from_file(doc_file)
+                    st.session_state.gallery_images.extend(extracted)
+                st.success("解析成功！图片已存入右侧图库。")
+
+        st.divider()
+
         with st.popover("⚙️ 系统设置 (API密钥)", use_container_width=True):
             st.text_input("Kimi API Key", key="kimi_key", type="password")
             st.text_input("百度翻译 APP ID", key="bd_id")
             st.text_input("百度翻译 密钥", key="bd_key", type="password")
-            st.button("💾 立即保存配置", on_click=save_config, type="primary", use_container_width=True)
+            st.button("💾 保存以上配置", on_click=save_config, type="primary", use_container_width=True)
 
         c1, c2 = st.columns(2)
         c1.text_input("封面:", key="cover_cn")
@@ -333,7 +354,7 @@ with col_mid:
         if tb1.button("📸 插入 1 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:1]"
         if tb2.button("📸 插入 2 框"): st.session_state.txt_cn += "\n\n[IMG_FRAME:2]"
         if tb3.button("✂️ 去说明"): 
-            st.toast("一键去说明：已由后台执行。如需精细处理请手动编辑文本框。")
+            st.toast("一键去说明：请在左侧文本框手动调整。")
         if tb4.button("🔄 去序号"):
             st.toast("排版系统已强制应用无序号符号，直接导出即可！")
             
@@ -346,7 +367,7 @@ with col_mid:
             prepare_download()
 
     if st.session_state.word_cn_ready:
-        st.success("🎉 生成完毕！请点击下方按钮下载：")
+        st.success("🎉 生成完毕！请点击下方按钮下载（包含精准背景及所有文案）：")
         dc1, dc2 = st.columns(2)
         dc1.download_button("📥 立即下载 中文规格书 (Word)", data=st.session_state.word_cn_ready, file_name=f"{st.session_state.cover_cn}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
         dc2.download_button("📥 Download English Spec (Word)", data=st.session_state.word_en_ready, file_name=f"{st.session_state.cover_en}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True)
@@ -360,14 +381,13 @@ with col_mid:
     title_px = st.session_state.title_size * 1.5
     body_px = st.session_state.body_size * 1.3
     
-    # 构造 HTML 解析器
     html_body = ""
     in_table = False
     for line in preview_txt.split('\n'):
         line = line.strip()
         if not line: continue
         
-        # 表格处理
+        # 表格 HTML 处理
         if '|' in line:
             if '---' in line: continue
             if not in_table:
@@ -397,24 +417,27 @@ with col_mid:
         # 列表与正文
         if line.startswith(('-', '*', '•')):
             sym = BULLET_STYLES.get(st.session_state.bullet, "●")
-            html_body += f'<div style="margin-bottom:6px;">{sym} {clean_markdown(line[1:])}</div>'
+            if sym in ("__NUM__", "__DOT__"): sym = "- "
+            html_body += f'<div style="margin-bottom:6px; margin-left: 20px;">{sym} {clean_markdown(line[1:])}</div>'
         else:
             html_body += f'<div style="margin-bottom:6px;">{clean_markdown(line)}</div>'
             
     if in_table: html_body += '</table>'
 
-    # 背景图 Base64 解析
+    # 背景图解析
     cv_bg_css = f"background-image: url('data:image/png;base64,{bytes_to_b64(st.session_state.bg_cover_bytes)}');" if st.session_state.bg_cover_bytes else "background-color: white;"
     bd_bg_css = f"background-image: url('data:image/png;base64,{bytes_to_b64(st.session_state.bg_body_bytes)}');" if st.session_state.bg_body_bytes else "background-color: white;"
 
-    # 渲染 A4 页面
+    # 渲染沉浸式桌面与 A4 纸张
     st.markdown(f"""
-        <div style="{cv_bg_css} background-size: 100% 100%; width: 100%; max-width: 800px; aspect-ratio: 1 / 1.414; margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 10px rgba(0,0,0,0.15);">
-            <h1 style="font-size: 3em; font-family: '{font_family}', sans-serif; color: #000; text-align:center;">{cover_title}</h1>
-        </div>
-        
-        <div style="{bd_bg_css} background-size: 100% 100%; width: 100%; max-width: 800px; min-height: 1131px; margin: 0 auto; padding: 10%; box-shadow: 0 4px 10px rgba(0,0,0,0.15); font-family: '{font_family}', sans-serif; font-size: {body_px}px; color: #000; line-height:1.5;">
-            {html_body}
+        <div class="desk-bg">
+            <div class="a4-page a4-cover" style="{cv_bg_css}">
+                <h1 style="font-size: 3.5em; font-family: '{font_family}', sans-serif; color: #1D1D1F;">{cover_title}</h1>
+            </div>
+            
+            <div class="a4-page" style="{bd_bg_css} font-family: '{font_family}', sans-serif; font-size: {body_px}px; color: #1D1D1F; line-height:1.6;">
+                {html_body}
+            </div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -432,32 +455,8 @@ with col_right:
         st.session_state.gallery_images = []
         st.rerun()
         
-    st.caption("导出 Word 后，可将以下提取的图片贴入图框中：")
+    st.caption("提取或上传的高清图片：")
     for img_bytes in st.session_state.gallery_images:
         try:
             st.image(img_bytes, use_container_width=True)
         except: pass
-
-# ----------------- 【底部】文档/网络提取区 -----------------
-st.divider()
-with st.expander("📂 底部工具栏：提取参考文档与解析图片", expanded=False):
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.markdown("**1. 解析 PDF/Word**")
-        doc_file = st.file_uploader("上传外部参考资料", type=['pdf', 'docx'])
-        if st.button("开始提取文本与图片", use_container_width=True) and doc_file:
-            with st.spinner("深度解析中..."):
-                if doc_file.name.endswith(".pdf"):
-                    with pdfplumber.open(doc_file) as pdf:
-                        st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-                doc_file.seek(0)
-                imgs = extract_images_from_file(doc_file)
-                st.session_state.gallery_images.extend(imgs)
-            st.success("解析成功！高清图片已存入右侧图库。")
-            
-    with c2:
-        st.markdown("**2. 查看提取的底层文本素材 (用于 AI 分析)**")
-        if st.session_state.raw_text:
-            st.text_area("解析出的文本内容", value=st.session_state.raw_text[:3000] + "\n...", height=150)
-        else:
-            st.info("上传资料后，解析出的纯文本将显示在这里。")
