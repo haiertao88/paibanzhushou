@@ -35,7 +35,7 @@ FONT_CHOICES = ["微软雅黑","宋体","黑体","楷体","仿宋","Arial","Time
 BULLET_STYLES = {"● 实心圆":"● ", "■ 实心方":"■ ", "▶ 三角形":"▶ ", "◆ 菱形":"◆ ", "○ 空心圆":"○ ", "① 带圈数字":"__NUM__", "1. 数字编号":"__DOT__", "— 短横线":"— "}
 
 # ═══════════════════════════════════════════
-# 2. 状态管理与回调函数 (彻底解决 AI 不写入的问题)
+# 2. 状态管理与配置保存
 # ═══════════════════════════════════════════
 def load_config():
     defaults = {
@@ -90,42 +90,8 @@ if 'app_config' not in st.session_state:
     st.session_state.bg_body_bytes = None
     st.session_state.current_lang = 'cn'
 
-# --- 核心修复：AI 撰写的回调函数 ---
-def perform_ai_write(lang):
-    if not st.session_state.kimi_key:
-        st.toast("❌ 请先在左侧【⚙️ 系统设置】中配置 Kimi API Key。", icon="❌")
-        return
-        
-    raw = st.session_state.get('raw_text', '')
-    
-    if lang == 'cn':
-        feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
-        base_prompt = f"资料：\n{raw[:6000]}\n\n要求：不输出产品名，以 **产品描述** 开头。严格使用标题：**产品描述** / **产品特点** / **产品指标** / **应用场景** / **使用说明**。\n注意：产品指标必须是Markdown表格。{feat_rule} 列表使用短横线 - 。"
-        custom_prompt = st.session_state.prompt_cn
-        prompt = custom_prompt + "\n\n" + base_prompt if custom_prompt else base_prompt
-    else:
-        base_prompt = f"Source:\n{raw[:6000]}\n\nRules: Start with **Product Description**. Use EXACT headings: **Product Description** / **Product Features** / **Product Specifications** / **Applications** / **Instructions**.\nSpecs MUST be a Markdown table. Use '-' for lists."
-        custom_prompt = st.session_state.prompt_en
-        prompt = custom_prompt + "\n\n" + base_prompt if custom_prompt else base_prompt
-
-    try:
-        res = requests.post(KIMI_API_URL, headers={"Authorization": f"Bearer {st.session_state.kimi_key}"},
-                            json={"model": "moonshot-v1-8k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2})
-        content = res.json()["choices"][0]["message"]["content"]
-        
-        # 强制更新 Session State，绑定到 Text Area
-        if lang == 'cn':
-            st.session_state.txt_cn = content
-            st.session_state.current_lang = 'cn'
-        else:
-            st.session_state.txt_en = content
-            st.session_state.current_lang = 'en'
-        st.toast("✅ AI 撰写完毕！", icon="✅")
-    except Exception as e: 
-        st.toast(f"❌ AI 错误: {str(e)}", icon="❌")
-
 # ═══════════════════════════════════════════
-# 3. 解析与 Word 导出算法
+# 3. 核心文件解析与 AI 函数 (修复文本缺失问题)
 # ═══════════════════════════════════════════
 def clean_markdown(t):
     if not t: return ""
@@ -139,6 +105,33 @@ def is_header(raw_line):
     if re.match(r'^\*\*.+\*\*$', raw_line) and not raw_line.startswith(('-','*','|')): return True
     return False
 
+# 解析文档文本 (PDF + DOCX)
+def extract_text_from_file(uploaded_file):
+    content = []
+    try:
+        if uploaded_file.name.endswith(".pdf"):
+            with pdfplumber.open(uploaded_file) as pdf:
+                for pg in pdf.pages:
+                    t = pg.extract_text()
+                    if t: content.append(t)
+                    # 尝试提取PDF中的表格
+                    for tbl in pg.extract_tables():
+                        content.append("\n[表格数据]")
+                        for row in tbl: 
+                            content.append("| " + " | ".join(str(c).replace('\n', ' ') for c in row if c is not None) + " |")
+        elif uploaded_file.name.endswith((".docx", ".doc")):
+            doc = Document(uploaded_file)
+            for para in doc.paragraphs:
+                if para.text.strip(): content.append(para.text)
+            for tbl in doc.tables:
+                content.append("\n[表格数据]")
+                for row in tbl.rows:
+                    content.append("| " + " | ".join(c.text.replace('\n', ' ') for c in row.cells) + " |")
+    except Exception as e:
+        st.error(f"文本提取错误: {e}")
+    return "\n".join(content)
+
+# 解析文档图片
 def extract_images_from_file(uploaded_file):
     imgs = []
     if uploaded_file.name.endswith(".pdf"):
@@ -150,7 +143,7 @@ def extract_images_from_file(uploaded_file):
                 base_image = doc.extract_image(xref)
                 image_bytes = base_image["image"]
                 if len(image_bytes) > 5000: imgs.append(image_bytes)
-    elif uploaded_file.name.endswith(".docx"):
+    elif uploaded_file.name.endswith((".docx", ".doc")):
         with zipfile.ZipFile(io.BytesIO(uploaded_file.read())) as z:
             for f in z.namelist():
                 if f.startswith("word/media/") and f.lower().endswith(('.png','.jpg','.jpeg')):
@@ -162,6 +155,48 @@ def bytes_to_b64(b):
     if not b: return ""
     return base64.b64encode(b).decode('utf-8')
 
+# --- AI 撰写强校验拦截 ---
+def perform_ai_write(lang):
+    if not st.session_state.kimi_key:
+        st.toast("❌ 请先在左侧【⚙️ 系统设置】中配置 Kimi API Key。", icon="❌")
+        return
+        
+    raw = st.session_state.get('raw_text', '').strip()
+    if not raw:
+        st.toast("❌ 缺少底层参考资料！请先上传文档并点击【提取资料】", icon="❌")
+        return
+    
+    # 加入强约束指令，防止乱编
+    anti_hallucination = "请务必【严格基于以上资料】进行提炼和排版，绝不可凭空捏造产品参数。"
+    
+    if lang == 'cn':
+        feat_rule = "特点只保留关键词，如「- 关键词」。" if not st.session_state.feature_brief else "特点包含简短说明。"
+        base_prompt = f"资料：\n{raw[:6000]}\n\n要求：不输出产品名，以 **产品描述** 开头。严格使用标题：**产品描述** / **产品特点** / **产品指标** / **应用场景** / **使用说明**。\n注意：产品指标必须是Markdown表格。{feat_rule} 列表使用短横线 - 。\n\n{anti_hallucination}"
+        custom_prompt = st.session_state.prompt_cn
+        prompt = custom_prompt + "\n\n" + base_prompt if custom_prompt else base_prompt
+    else:
+        base_prompt = f"Source:\n{raw[:6000]}\n\nRules: Start with **Product Description**. Use EXACT headings: **Product Description** / **Product Features** / **Product Specifications** / **Applications** / **Instructions**.\nSpecs MUST be a Markdown table. Use '-' for lists.\n\nCRITICAL: Strictly rely on the provided source. Do NOT make up specifications."
+        custom_prompt = st.session_state.prompt_en
+        prompt = custom_prompt + "\n\n" + base_prompt if custom_prompt else base_prompt
+
+    try:
+        res = requests.post(KIMI_API_URL, headers={"Authorization": f"Bearer {st.session_state.kimi_key}"},
+                            json={"model": "moonshot-v1-8k", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2})
+        content = res.json()["choices"][0]["message"]["content"]
+        
+        if lang == 'cn':
+            st.session_state.txt_cn = content
+            st.session_state.current_lang = 'cn'
+        else:
+            st.session_state.txt_en = content
+            st.session_state.current_lang = 'en'
+        st.toast("✅ AI 撰写完毕，已同步至文本框！", icon="✅")
+    except Exception as e: 
+        st.toast(f"❌ AI 接口异常: {str(e)}", icon="❌")
+
+# ═══════════════════════════════════════════
+# 4. Word 导出算法
+# ═══════════════════════════════════════════
 def _add_word_bg(section, bg_bytes):
     if not bg_bytes: return
     hdr = section.header
@@ -196,7 +231,7 @@ def generate_word_document(lang):
     doc.styles['Normal'].font.name = fn
     if lang == 'cn': doc.styles['Normal']._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 封面背景
+    # 封面
     if st.session_state.bg_cover_bytes: _add_word_bg(sec, st.session_state.bg_cover_bytes)
     cp = doc.add_paragraph(); cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for _ in range(12): cp.add_run('\n')
@@ -205,7 +240,7 @@ def generate_word_document(lang):
     rn.bold = True; rn.font.size = Pt(max(st.session_state.title_size + 14, 24)); rn.font.name = fn
     if lang == 'cn': rn._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), fn)
     
-    # 正文背景
+    # 正文
     doc.add_page_break()
     bs = doc.add_section() 
     bs.header.is_linked_to_previous = False 
@@ -225,7 +260,7 @@ def generate_word_document(lang):
         lt = line.strip()
         if not lt: continue
         
-        # 真实图片插入
+        # 渲染真实图片
         local_img_m = re.match(r'^\[LOCAL_IMG:(.+?)\]$', lt)
         if local_img_m:
             img_hash = local_img_m.group(1)
@@ -284,13 +319,11 @@ def generate_word_document(lang):
     return target_stream
 
 # ═══════════════════════════════════════════
-# 5. 1:1 还原 Windows 排版界面
+# 5. UI 交互布局
 # ═══════════════════════════════════════════
 st.markdown("""
     <style>
     .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; max-width: 98% !important; }
-    
-    /* 强制重置工具栏元素间距，实现真正的“紧凑工具栏” */
     div[data-testid="stHorizontalBlock"] { gap: 0.5rem !important; align-items: center !important; margin-bottom: -10px !important;}
     .stButton > button, .stDownloadButton > button, .stPopover > button {
         font-size: 13px !important; padding: 2px 8px !important; min-height: 32px !important; height: 32px !important; border-radius: 4px !important; border: 1px solid #d1d1d6;
@@ -298,12 +331,9 @@ st.markdown("""
     .stDownloadButton > button { font-weight: bold; background-color: #FF3B30; color: white; border: none; }
     .btn-blue > button { background-color: #007AFF !important; color: white !important; font-weight: bold; }
     .btn-green > button { background-color: #34C759 !important; color: white !important; font-weight: bold; }
-    
-    /* 输入框与标签同一行排列技巧 */
     .stTextInput, .stNumberInput, .stSelectbox { display: flex; flex-direction: row; align-items: center; gap: 5px; }
     .stTextInput label, .stNumberInput label, .stSelectbox label { font-size: 13px !important; min-width: max-content; margin-bottom: 0 !important; }
     .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] { font-size: 13px !important; min-height: 32px !important; height: 32px !important; }
-    
     .stTextArea textarea { font-family: Consolas, monospace; font-size: 13px; background-color: #fcfcfc; border: 1px solid #ccc; border-radius: 2px; }
     .header-text { font-size: 18px; font-weight: bold; color: #1D1D1F; padding-bottom: 10px; border-bottom: 1px solid #eaeaea; margin-bottom: 15px;}
     </style>
@@ -316,25 +346,30 @@ col_left, col_mid, col_right = st.columns([1.3, 2.7, 0.8], gap="medium")
 # ----------------- 【左侧】文档导入与 AI 撰写区 -----------------
 with col_left:
     with st.container(border=True):
-        st.markdown("**1. 基础配置**")
+        st.markdown("**1. 基础配置与资料库**")
         
-        # 导入解析区
         st.markdown("<span style='font-size: 12px; color: #666;'>📂 导入文档(PDF/DOCX) 解析底层资料</span>", unsafe_allow_html=True)
         doc_file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
         
         c_p1, c_p2 = st.columns([1, 1])
         if c_p1.button("🚀 提取资料与高清图片", use_container_width=True):
             if doc_file:
-                with st.spinner("深度解析中..."):
-                    if doc_file.name.endswith(".pdf"):
-                        with pdfplumber.open(doc_file) as pdf:
-                            st.session_state.raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+                with st.spinner("深度解析文本与表格中..."):
+                    # 核心修复：执行完整的文本和表格解析
                     doc_file.seek(0)
-                    extracted = extract_images_from_file(doc_file)
-                    for b in extracted:
+                    extracted_text = extract_text_from_file(doc_file)
+                    st.session_state.raw_text = extracted_text
+                    
+                    doc_file.seek(0)
+                    extracted_imgs = extract_images_from_file(doc_file)
+                    for b in extracted_imgs:
                         h = hashlib.md5(b).hexdigest()
                         st.session_state.gallery_dict[h] = b
-                st.success("解析成功！图片已入图库。")
+                        
+                if st.session_state.raw_text:
+                    st.success(f"解析成功！提取文字 {len(st.session_state.raw_text)} 个，图片已入图库。")
+                else:
+                    st.warning("解析完成，但未识别出文本。若为全图片PDF，AI将无法读取内容。")
             else:
                 st.warning("请先上传文档！")
                 
@@ -342,9 +377,15 @@ with col_left:
             st.session_state.txt_cn = ""; st.session_state.txt_en = ""; st.session_state.raw_text = ""
             st.rerun()
 
+        # 核心修复：可视化展示提取的文本，确保用户和AI都知道数据在哪
+        with st.expander("👀 查看已解析的底层参考资料 (发给AI分析的数据)"):
+            if st.session_state.raw_text:
+                st.text(st.session_state.raw_text[:2000] + ("\n...(内容过长已折叠)..." if len(st.session_state.raw_text)>2000 else ""))
+            else:
+                st.info("暂未提取到文本。")
+
         st.divider()
 
-        # 系统设置
         with st.popover("⚙️ 系统设置 (API密钥)", use_container_width=True):
             st.text_input("Kimi API Key", key="kimi_key", type="password")
             st.text_input("百度翻译 APP ID", key="bd_id")
@@ -356,7 +397,6 @@ with col_left:
         c2.text_input("EN:", key="cover_en", label_visibility="collapsed", placeholder="EN Name")
         st.checkbox("产品特点含简短说明", key="feature_brief")
         
-        # AI 按钮 (通过 on_click 触发)
         st.markdown("<div class='btn-blue'>", unsafe_allow_html=True)
         bc1, bc2 = st.columns(2)
         bc1.button("✨ AI 中文撰写", on_click=perform_ai_write, args=('cn',), use_container_width=True)
@@ -371,13 +411,13 @@ with col_left:
     with tab_prompt:
         st.text_area("中文自定义提示词", key="prompt_cn", height=150)
         st.text_area("英文自定义提示词", key="prompt_en", height=150)
+        st.caption("提示：在上述文本框输入额外要求后，点击 AI 撰写按钮生效。")
 
-# ----------------- 【中间】排版预览区 (完美复刻原版 4 排工具栏) -----------------
+# ----------------- 【中间】排版预览区 -----------------
 with col_mid:
     with st.container(border=True):
         st.markdown("**📄 预览与排版区**")
         
-        # 第一排工具栏
         t1, t2, t3, t4, t5, t6 = st.columns([1, 1, 0.8, 0.8, 1, 1])
         t1.selectbox("中文", FONT_CHOICES, key="font_cn")
         t2.selectbox("英文", FONT_CHOICES, key="font_en")
@@ -389,7 +429,6 @@ with col_mid:
             st.session_state.body_size = 11; st.session_state.bullet = "● 实心圆"
             st.rerun()
 
-        # 第二排工具栏
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
         b1, b2, b3, b4, b5, b6, b7 = st.columns([0.6, 0.8, 0.8, 0.8, 0.8, 0.8, 1.2])
         b1.markdown("<span style='font-size:13px; line-height:32px;'>📷 图框:</span>", unsafe_allow_html=True)
@@ -402,12 +441,10 @@ with col_mid:
             st.session_state.txt_cn = re.sub(r'\[IMG_FRAME:\d+\]', '', st.session_state.txt_cn)
             st.rerun()
 
-        # 第三排工具栏
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
         c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.5, 1])
         if c1.button("🔀 行列互换"): st.toast("网页端暂不支持单表反转")
-        if c2.button("✂️ 去说明"): 
-            st.toast("一键去说明：请在左侧文本框手动调整。")
+        if c2.button("✂️ 去说明"): st.toast("一键去说明：请在左侧文本框手动调整。")
         if c3.button("🔄 去序号"): st.toast("系统已强制应用无序号符号！")
         with c4.popover("🖼️ 设置导出Word背景", use_container_width=True):
             st.caption("设置导出的A4底图")
@@ -418,9 +455,7 @@ with col_mid:
             if st.button("🗑️ 清空所有背景", use_container_width=True):
                 st.session_state.bg_cover_bytes = None; st.session_state.bg_body_bytes = None
         
-        # 导出按钮 (完美靠右)
         c5.download_button("📥 导出中文 Word", data=generate_word_document('cn'), file_name=f"{st.session_state.cover_cn}.docx", use_container_width=True)
-        # c6.download_button("📥 导出英文 Word", data=generate_word_document('en'), file_name=f"{st.session_state.cover_en}.docx", use_container_width=True)
 
     # ---------------- 核心：独立 HTML A4 实时高保真渲染引擎 ----------------
     preview_txt = st.session_state.txt_cn if st.session_state.current_lang == 'cn' else st.session_state.txt_en
@@ -435,7 +470,6 @@ with col_mid:
         line = line.strip()
         if not line: continue
         
-        # 渲染右侧图库插入的实体图片
         local_img_m = re.match(r'^\[LOCAL_IMG:(.+?)\]$', line)
         if local_img_m:
             img_hash = local_img_m.group(1)
@@ -457,8 +491,7 @@ with col_mid:
             continue
             
         if in_table:
-            html_body += '</table>'
-            in_table = False
+            html_body += '</table>'; in_table = False
             
         if 'IMG_FRAME' in line:
             html_body += f'<div style="border:2px dashed #007AFF; padding: 30px; text-align: center; margin: 15px 0; background: rgba(0,122,255,0.05); color:#007AFF;"><b>🖼️ 排版预留占位框</b></div>'
@@ -495,12 +528,8 @@ with col_mid:
         </style>
     </head>
     <body>
-        <div class="a4-page cover">
-            <h1 style="font-size: 3.5em; color: #1D1D1F;">{cover_title}</h1>
-        </div>
-        <div class="a4-page body-page">
-            {html_body}
-        </div>
+        <div class="a4-page cover"><h1 style="font-size: 3.5em; color: #1D1D1F;">{cover_title}</h1></div>
+        <div class="a4-page body-page">{html_body}</div>
     </body>
     </html>
     """
@@ -528,7 +557,6 @@ with col_right:
                 st.markdown("<div class='btn-green'>", unsafe_allow_html=True)
                 if st.button("➕ 插入至文末", key=f"ins_{img_hash}", use_container_width=True):
                     target_key = 'txt_cn' if st.session_state.current_lang == 'cn' else 'txt_en'
-                    # 追加图片标记到文案中
                     st.session_state[target_key] += f"\n\n[LOCAL_IMG:{img_hash}]\n\n"
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
