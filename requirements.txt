@@ -1,6 +1,6 @@
+streamlit
 Pillow
 python-docx
 pdfplumber
 requests
 beautifulsoup4
-pymupdf
