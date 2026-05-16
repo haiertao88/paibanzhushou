@@ -1,265 +1,206 @@
-import streamlit as st
-import requests
-from docx import Document
-from docx.shared import Inches
+from flask import Flask, render_template_string, request
+import markdown
 import re
-import os
 
-# ========================
-# 配置
-# ========================
-st.set_page_config(layout="wide", page_title="海风米奇奇迹版 Web 完全体")
+app = Flask(__name__)
 
-API_KEY = "你的key"
-API_URL = "https://api.moonshot.cn/v1/chat/completions"
+# =========================
+# 核心渲染逻辑（复刻桌面版）
+# =========================
+def render_advanced(text):
+    # 双语块处理 [cn]中文[/cn][en]English[/en]
+    def replace_bilingual(match):
+        cn = match.group(1)
+        en = match.group(2)
+        return f"""
+        <div class="bilingual">
+            <div class="cn">{cn}</div>
+            <div class="en">{en}</div>
+        </div>
+        """
+    text = re.sub(r'\[cn\](.*?)\[/cn\]\s*\[en\](.*?)\[/en\]', replace_bilingual, text, flags=re.S)
 
-# ========================
-# AI生成（支持双语）
-# ========================
-def generate_ai(text, bilingual=False):
+    # 图片块 [img]url[/img]
+    text = re.sub(r'\[img\](.*?)\[/img\]', r'<div class="img-box"><img src="\1"></div>', text)
 
-    if bilingual:
-        extra = "并提供中英文双语（中文+English）"
-    else:
-        extra = "仅中文"
+    # 表格增强（简单处理）
+    html = markdown.markdown(text, extensions=['tables'])
 
-    prompt = f"""
-生成专业产品规格书，要求：
+    return html
 
-结构：
-【产品名称】
-【产品描述】
-【产品特点】
-- xxx
-【技术参数】
-参数: 值
 
-要求：
-{extra}
-可包含图片URL（如果适合）
+# =========================
+# 商业UI模板（核心）
+# =========================
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>海风米奇 · Web商业版</title>
 
-输入：
-{text}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+<style>
+body {
+    background: #0f172a;
+    color: #e5e7eb;
+    font-family: "Segoe UI", sans-serif;
+}
+
+.topbar {
+    background: #020617;
+    padding: 12px 20px;
+    font-size: 18px;
+    font-weight: bold;
+    border-bottom: 1px solid #1e293b;
+}
+
+.container-main {
+    display: flex;
+    height: calc(100vh - 60px);
+}
+
+/* 左侧输入 */
+.left {
+    width: 50%;
+    padding: 15px;
+    border-right: 1px solid #1e293b;
+}
+
+textarea {
+    width: 100%;
+    height: 100%;
+    background: #020617;
+    color: #e2e8f0;
+    border: none;
+    padding: 15px;
+    font-size: 14px;
+    border-radius: 10px;
+}
+
+/* 右侧预览 */
+.right {
+    width: 50%;
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.preview {
+    background: #020617;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.4);
+}
+
+/* 双语 */
+.bilingual {
+    display: flex;
+    gap: 20px;
+    margin: 20px 0;
+}
+.bilingual .cn {
+    width: 50%;
+    font-weight: bold;
+    color: #38bdf8;
+}
+.bilingual .en {
+    width: 50%;
+    color: #cbd5f5;
+}
+
+/* 图片 */
+.img-box {
+    text-align: center;
+    margin: 20px 0;
+}
+.img-box img {
+    max-width: 90%;
+    border-radius: 10px;
+    box-shadow: 0 0 10px #000;
+}
+
+/* 表格 */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+th, td {
+    border: 1px solid #334155;
+    padding: 8px;
+}
+th {
+    background: #1e293b;
+}
+
+/* 工具栏 */
+.toolbar {
+    margin-bottom: 10px;
+}
+button {
+    margin-right: 5px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="topbar">🌊 海风米奇奇迹版 · Web商业版</div>
+
+<div class="container-main">
+
+    <div class="left">
+        <div class="toolbar">
+            <button class="btn btn-sm btn-primary" onclick="insertText('[cn]中文[/cn][en]English[/en]')">双语</button>
+            <button class="btn btn-sm btn-success" onclick="insertText('[img]图片URL[/img]')">图片</button>
+            <button class="btn btn-sm btn-warning" onclick="insertText('| 列1 | 列2 |\\n|---|---|\\n| 内容 | 内容 |')">表格</button>
+        </div>
+
+        <form method="post">
+            <textarea name="text">{{text}}</textarea>
+            <br><br>
+            <button class="btn btn-success">实时渲染</button>
+        </form>
+    </div>
+
+    <div class="right">
+        <div class="preview">
+            {{content|safe}}
+        </div>
+    </div>
+
+</div>
+
+<script>
+function insertText(txt){
+    let textarea = document.querySelector("textarea");
+    textarea.value += "\\n" + txt;
+}
+</script>
+
+</body>
+</html>
 """
 
-    res = requests.post(
-        API_URL,
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        json={
-            "model": "kimi",
-            "messages": [{"role": "user", "content": prompt}]
-        }
-    )
 
-    return res.json()
+# =========================
+# 路由
+# =========================
+@app.route("/", methods=["GET", "POST"])
+def index():
+    text = ""
+    content = ""
 
+    if request.method == "POST":
+        text = request.form.get("text")
+        content = render_advanced(text)
 
-# ========================
-# 图片识别
-# ========================
-def extract_images(text):
-    urls = re.findall(r'(https?://\S+\.(jpg|png|jpeg))', text)
-    return [u[0] for u in urls]
+    return render_template_string(HTML, text=text, content=content)
 
 
-# ========================
-# ⭐ 排版引擎（强化版）
-# ========================
-def format_content(ai_data):
-
-    text = ai_data["choices"][0]["message"]["content"]
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    content = {
-        "title": "",
-        "description": "",
-        "features": [],
-        "params": {},
-        "images": [],
-        "bilingual": []
-    }
-
-    current = None
-
-    for line in lines:
-
-        # 标题识别
-        if "产品名称" in line:
-            current = "title"
-            continue
-        if "产品描述" in line:
-            current = "desc"
-            continue
-        if "产品特点" in line:
-            current = "features"
-            continue
-        if "技术参数" in line:
-            current = "params"
-            continue
-
-        # 内容解析
-        if current == "title":
-            content["title"] = line
-
-        elif current == "desc":
-            content["description"] += line + "\n"
-
-        elif current == "features":
-            if line.startswith("-"):
-                content["features"].append(line[1:].strip())
-            else:
-                content["features"].append(line)
-
-        elif current == "params":
-            if ":" in line or "：" in line:
-                k, v = line.replace("：", ":").split(":", 1)
-                content["params"][k.strip()] = v.strip()
-
-        else:
-            content["description"] += line + "\n"
-
-    # 图片提取
-    content["images"] = extract_images(text)
-
-    # 双语检测（简单规则）
-    for f in content["features"]:
-        if any(c.isalpha() for c in f):
-            content["bilingual"].append(f)
-
-    return content
-
-
-# ========================
-# ⭐ DOCX导出（完全体）
-# ========================
-def export_docx(content):
-
-    doc = Document()
-
-    # 标题
-    doc.add_heading(content["title"], 0)
-
-    # 描述
-    doc.add_heading("产品描述", 1)
-    doc.add_paragraph(content["description"])
-
-    # 图片（自动插入）
-    if content["images"]:
-        doc.add_heading("产品图片", 1)
-        for img in content["images"]:
-            try:
-                import requests
-                r = requests.get(img)
-                with open("temp.jpg", "wb") as f:
-                    f.write(r.content)
-                doc.add_picture("temp.jpg", width=Inches(4))
-                os.remove("temp.jpg")
-            except:
-                pass
-
-    # 特点
-    doc.add_heading("产品特点", 1)
-    for f in content["features"]:
-        doc.add_paragraph(f"• {f}")
-
-    # 参数表（增强）
-    doc.add_heading("技术参数", 1)
-
-    if content["params"]:
-        table = doc.add_table(rows=1, cols=2)
-        table.style = "Table Grid"
-
-        hdr = table.rows[0].cells
-        hdr[0].text = "参数"
-        hdr[1].text = "说明"
-
-        for k, v in content["params"].items():
-            row = table.add_row().cells
-            row[0].text = k
-            row[1].text = v
-
-    file = "完整版规格书.docx"
-    doc.save(file)
-
-    return file
-
-
-# ========================
-# UI
-# ========================
-st.title("🌊 海风米奇奇迹版（完全体Web）")
-
-col1, col2 = st.columns([1, 2])
-
-# 左侧
-with col1:
-
-    st.subheader("🧩 控制面板")
-
-    user_input = st.text_area("输入产品信息", height=220)
-
-    bilingual = st.checkbox("🌍 中英双语")
-
-    generate_btn = st.button("🚀 生成")
-    export_btn = st.button("📄 导出Word")
-
-# 右侧
-with col2:
-
-    st.subheader("📊 预览")
-
-    if "data" not in st.session_state:
-        st.session_state.data = None
-
-    if generate_btn:
-
-        if not user_input:
-            st.warning("请输入内容")
-        else:
-            with st.spinner("AI生成中..."):
-                ai = generate_ai(user_input, bilingual)
-                parsed = format_content(ai)
-                st.session_state.data = parsed
-
-    data = st.session_state.data
-
-    if data:
-
-        st.markdown(f"# {data['title']}")
-
-        st.markdown("### 📖 产品描述")
-        st.write(data["description"])
-
-        # 图片展示
-        if data["images"]:
-            st.markdown("### 🖼 产品图片")
-            for img in data["images"]:
-                st.image(img, width=300)
-
-        # 特点
-        st.markdown("### ✨ 产品特点")
-        for f in data["features"]:
-            st.write(f"• {f}")
-
-        # 参数
-        st.markdown("### 📌 技术参数")
-        for k, v in data["params"].items():
-            st.write(f"{k}：{v}")
-
-    else:
-        st.info("等待生成...")
-
-
-# ========================
-# 导出
-# ========================
-if export_btn:
-
-    if st.session_state.data:
-        file = export_docx(st.session_state.data)
-
-        with open(file, "rb") as f:
-            st.download_button("⬇️ 下载Word", f, file_name=file)
-    else:
-        st.warning("请先生成")
+# =========================
+# 启动
+# =========================
+if __name__ == "__main__":
+    app.run(debug=True)
